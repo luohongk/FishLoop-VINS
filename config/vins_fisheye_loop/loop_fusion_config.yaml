@@ -57,13 +57,13 @@ loop_eucm_min_z: 0.10
 
 # loop_fusion 结果输出目录。
 # 程序会把回环优化后的轨迹写到 <output_path>/vio_loop.csv。
-# 当前容器把本仓库挂载到 /root/catkin_ws/src/VINS-Fisheye。
-# 写到这里会出现在宿主机 /home/lhk/workspace/VINS-Fisheye/data。
-output_path: "/root/catkin_ws/src/VINS-Fisheye/data"
+# 当前容器把本仓库挂载到 /root/catkin_ws/src/fishloop_vins。
+# 写到这里会出现在宿主机 /home/lhk/workspace/FishLoop-VINS/data。
+output_path: "/root/catkin_ws/src/fishloop_vins/data"
 
 # pose graph 保存目录。
 # 在 loop_fusion 终端按保存快捷键时会把 pose graph 写到这里。
-pose_graph_save_path: "/root/catkin_ws/src/VINS-Fisheye/data/pose_graph/"
+pose_graph_save_path: "/root/catkin_ws/src/fishloop_vins/data/pose_graph/"
 
 # 是否加载之前保存的 pose graph。
 # 0 = 每次从空图开始；1 = 启动时加载 pose_graph_save_path 下的历史图。

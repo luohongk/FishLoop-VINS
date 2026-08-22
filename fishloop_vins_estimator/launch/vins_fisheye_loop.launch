@@ -2,10 +2,10 @@
     <arg name="config_file" default="$(find fishloop_vins)/../config/vins_fisheye_loop/stereo_imu_config.yaml" />
     <arg name="viz"         default="true" />
     <arg name="tracking_viz" default="true" />
-    <!-- Physical input topics. Defaults preserve the standardized VINS
-         interface; callers may point these directly at bag-native cam1/cam2. -->
-    <arg name="input_left_topic"  default="/cam0/image/compressed" />
-    <arg name="input_right_topic" default="/cam1/image/compressed" />
+    <!-- Physical input topics used by stereo_imu_config.yaml and the
+         cam1/cam2 compressed-image bags. -->
+    <arg name="input_left_topic"  default="/cam1/image/compressed" />
+    <arg name="input_right_topic" default="/cam2/image/compressed" />
 
     <!-- Stereo fisheye tracking + VINS trajectory visualizer -->
     <node pkg="fishloop_vins" type="viz_fisheye_tracking.py" name="viz_fisheye_tracking"
@@ -30,8 +30,8 @@
     <node pkg="fishloop_vins" type="fishloop_vins_node_fisheye" name="vins_estimator" output="screen">
         <param name="config_file" type="string" value="$(arg config_file)"/>
         <param name="fisheye_external_flatten" type="bool" value="false"/>
-        <remap from="/cam0/image/compressed" to="$(arg input_left_topic)"/>
-        <remap from="/cam1/image/compressed" to="$(arg input_right_topic)"/>
+        <remap from="/cam1/image/compressed" to="$(arg input_left_topic)"/>
+        <remap from="/cam2/image/compressed" to="$(arg input_right_topic)"/>
     </node>
 
     <arg name="loop_fusion"        default="true" />

@@ -34,7 +34,7 @@ is_compressed_images: 1
 compressed_image0_topic: "/cam1/image/compressed"
 compressed_image1_topic: "/cam2/image/compressed"
 
-output_path: "/root/catkin_ws/src/VINS-Fisheye/data"
+output_path: "/root/catkin_ws/src/fishloop_vins/data"
 
 cam0_calib: "cam1_eucm.yaml"
 cam1_calib: "cam2_eucm.yaml"
@@ -133,7 +133,7 @@ td: -4.4974052495221515e-03      # kalibr "timeshift_cam_imu"
 
 #loop closure parameters
 load_previous_pose_graph: 0
-pose_graph_save_path: "/root/catkin_ws/src/VINS-Fisheye/data/pose_graph/"
+pose_graph_save_path: "/root/catkin_ws/src/fishloop_vins/data/pose_graph/"
 save_image: 0
 
 #rectify

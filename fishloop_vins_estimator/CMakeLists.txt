@@ -3,7 +3,6 @@ project(fishloop_vins)
 
 set(CMAKE_BUILD_TYPE "Release")
 set(CMAKE_CXX_FLAGS "-std=c++14 -fopenmp")
-#-DEIGEN_USE_MKL_ALL")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall -g")
 
 set(ENABLE_BACKWARD true)
@@ -58,11 +57,6 @@ endif()
 
 if(ENABLE_VWORKS)
     find_package(VisionWorks REQUIRED)
-    #Set path to visionworks sample here
-    # include_directories(
-        # /home/xuhao/VisionWorks-1.6-Samples/nvxio/include
-    # )
-    # link_directories(/home/xuhao/VisionWorks-1.6-Samples/libs/x86_64/linux/release/)
     add_definitions(-DWITH_VWORKS)
 else()
 endif()
@@ -89,7 +83,6 @@ message(STATUS "    version: ${OpenCV_VERSION}")
 message(STATUS "    libraries: ${OpenCV_LIBS}")
 message(STATUS "    include path: ${OpenCV_INCLUDE_DIRS}")
 message(STATUS "    catkin libraries: ${catkin_LIBRARIES}")
-#catkin_package()
 
 add_message_files(
     FILES
@@ -164,22 +157,12 @@ target_link_libraries(estimator_lib vins_params_lib vins_lib stereo_depth ${catk
 target_link_libraries(fisheyeNode_lib ${catkin_LIBRARIES} ${OpenCV_LIBS} ${VisionWorks_LIBRARIES} ${LIBDW} OpenMP::OpenMP_CXX)
 
 
-#add_executable(vins_node src/rosNodeTest.cpp)
-#target_link_libraries(vins_node vins_lib estimator_lib vins_frontend stereo_depth vins_factors_lib vins_params_lib)
-
 add_executable(fishloop_vins_node_fisheye src/rosNodeFisheye.cpp)
 target_link_libraries(fishloop_vins_node_fisheye vins_lib fisheyeNode_lib estimator_lib vins_frontend stereo_depth vins_factors_lib vins_params_lib)
 
 add_library(vins_nodelet_lib src/rosNodelet.cpp)
 target_link_libraries(vins_nodelet_lib vins_lib fisheyeNode_lib estimator_lib vins_frontend stereo_depth vins_factors_lib vins_params_lib OpenMP::OpenMP_CXX)
 
-# Install python helper scripts so `rosrun fishloop_vins pad_fisheye_node.py` works.
-# We bypass catkin_install_python because, on a fresh build, it tries to
-# write into ${CMAKE_CURRENT_BINARY_DIR}/catkin_generated/installspace/
-# before catkin has created that directory, causing
-#   "file failed to open for writing (No such file or directory)".
-# Instead we put a symlink straight into the devel-space lib dir, which
-# is exactly what `rosrun` looks at.
 file(MAKE_DIRECTORY "${CATKIN_DEVEL_PREFIX}/lib/${PROJECT_NAME}")
 execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
     "${CMAKE_CURRENT_SOURCE_DIR}/scripts/pad_fisheye_node.py"

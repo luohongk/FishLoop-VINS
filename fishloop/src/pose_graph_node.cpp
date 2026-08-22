@@ -22,6 +22,7 @@
 #include <std_msgs/Bool.h>
 #include <cv_bridge/cv_bridge.h>
 #include <fishloop_vins/VIOKeyframe.h>
+#include <fstream>
 #include <iostream>
 #include <ros/package.h>
 #include <mutex>
@@ -487,13 +488,32 @@ int main(int argc, char **argv)
 
     ROW = fsSettings["image_height"];
     COL = fsSettings["image_width"];
-    std::string pkg_path = ros::package::getPath("loop_fusion");
-    string vocabulary_file = pkg_path + "/../support_files/brief_k10L6.bin";
-    cout << "vocabulary_file" << vocabulary_file << endl;
-    posegraph.loadVocabulary(vocabulary_file);
+    const std::string pkg_path = ros::package::getPath("fishloop");
+    if (pkg_path.empty())
+    {
+        ROS_FATAL("Failed to resolve ROS package 'fishloop'. Source the rebuilt catkin workspace before launching.");
+        return 1;
+    }
 
-    BRIEF_PATTERN_FILE = pkg_path + "/../support_files/brief_pattern.yml";
-    cout << "BRIEF_PATTERN_FILE" << BRIEF_PATTERN_FILE << endl;
+    const std::string vocabulary_file = pkg_path + "/brief/brief_k10L6.bin";
+    BRIEF_PATTERN_FILE = pkg_path + "/brief/brief_pattern.yml";
+
+    std::ifstream vocabulary_stream(vocabulary_file, std::ios::binary);
+    if (!vocabulary_stream.good())
+    {
+        ROS_FATAL_STREAM("Failed to open loop vocabulary: " << vocabulary_file);
+        return 1;
+    }
+    std::ifstream brief_pattern_stream(BRIEF_PATTERN_FILE);
+    if (!brief_pattern_stream.good())
+    {
+        ROS_FATAL_STREAM("Failed to open BRIEF pattern: " << BRIEF_PATTERN_FILE);
+        return 1;
+    }
+
+    cout << "vocabulary_file: " << vocabulary_file << endl;
+    cout << "BRIEF_PATTERN_FILE: " << BRIEF_PATTERN_FILE << endl;
+    posegraph.loadVocabulary(vocabulary_file);
 
     int pn = config_file.find_last_of('/');
     std::string configPath = config_file.substr(0, pn);

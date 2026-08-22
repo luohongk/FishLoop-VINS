@@ -34,3 +34,22 @@ GPU 版(一行)
 cd ~/catkin_ws
 
 catkin_make -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -j8
+
+运行：
+
+
+  终端 1：
+
+  source ~/catkin_ws/devel/setup.bash
+  roslaunch fishloop_vins vins_fisheye_loop.launch
+
+  终端 2 的 rosbag play 不涉及包名，因此不用改：
+
+  source ~/catkin_ws/devel/setup.bash
+  rosbag play /data/20260528-164331.bag --clock
+
+  或者播放另一份数据：
+
+  rosbag play /data/20260818-161025-cam1-cam2-imu-jpeg-q90.bag --clock
+
+  注意：同一终端连续写两条 rosbag play，第二条会等第一条播放完才执行。一般是两份数据任选一份，不要同时播放。
