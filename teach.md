@@ -37,7 +37,6 @@ catkin_make -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -j8
 
 运行：
 
-
   终端 1：
 
   source ~/catkin_ws/devel/setup.bash
