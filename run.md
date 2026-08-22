@@ -263,7 +263,7 @@ roscore
 docker exec -it vins-fisheye-gpu bash
 source /opt/ros/noetic/setup.bash
 source /root/catkin_ws/devel/setup.bash
-roslaunch vins vins_fisheye_loop.launch
+roslaunch fishloop_vins vins_fisheye_loop.launch
 ```
 
 无界面：
@@ -272,7 +272,7 @@ roslaunch vins vins_fisheye_loop.launch
 docker exec -it vins-fisheye-gpu bash
 source /opt/ros/noetic/setup.bash
 source /root/catkin_ws/devel/setup.bash
-roslaunch vins vins_fisheye_loop.launch \
+roslaunch fishloop_vins vins_fisheye_loop.launch \
   viz:=false tracking_viz:=false loop_fusion:=true
 ```
 

@@ -70,7 +70,7 @@ if ! rostopic list >/dev/null 2>&1; then
     done
 fi
 
-roslaunch vins vins_fisheye_loop.launch \
+roslaunch fishloop_vins vins_fisheye_loop.launch \
     viz:="${VIZ}" \
     tracking_viz:="${TRACKING_VIZ}" \
     loop_fusion:="${LOOP_FUSION}" \

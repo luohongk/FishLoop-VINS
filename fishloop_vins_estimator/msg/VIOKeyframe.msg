@@ -9,6 +9,6 @@ uint8[] feature_points_flag
 
 # Structured, multi-camera loop-closure observations.  The legacy arrays above
 # remain populated for compatibility with older consumers.
-vins/LoopFeature[] loop_features
+fishloop_vins/LoopFeature[] loop_features
 
 geometry_msgs/Pose camera_extrisinc

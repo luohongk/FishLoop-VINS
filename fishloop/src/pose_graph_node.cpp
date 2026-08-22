@@ -21,7 +21,7 @@
 #include <visualization_msgs/Marker.h>
 #include <std_msgs/Bool.h>
 #include <cv_bridge/cv_bridge.h>
-#include <vins/VIOKeyframe.h>
+#include <fishloop_vins/VIOKeyframe.h>
 #include <iostream>
 #include <ros/package.h>
 #include <mutex>
@@ -39,7 +39,7 @@ using namespace std;
 
 queue<sensor_msgs::ImageConstPtr> image0_buf;
 queue<sensor_msgs::ImageConstPtr> image1_buf;
-queue<vins::VIOKeyframeConstPtr> keyframe_buf;
+queue<fishloop_vins::VIOKeyframeConstPtr> keyframe_buf;
 queue<Eigen::Vector3d> odometry_buf;
 std::mutex m_buf;
 std::mutex m_process;
@@ -221,7 +221,7 @@ void margin_point_callback(const sensor_msgs::PointCloudConstPtr &point_msg)
     pub_margin_cloud.publish(point_cloud);
 }
 
-void keyframe_callback(const vins::VIOKeyframeConstPtr &keyframe_msg)
+void keyframe_callback(const fishloop_vins::VIOKeyframeConstPtr &keyframe_msg)
 {
     std::lock_guard<std::mutex> lock(m_buf);
     keyframe_buf.push(keyframe_msg);
@@ -288,7 +288,7 @@ void process()
     {
         sensor_msgs::ImageConstPtr image0_msg = NULL;
         sensor_msgs::ImageConstPtr image1_msg = NULL;
-        vins::VIOKeyframeConstPtr keyframe_msg = NULL;
+        fishloop_vins::VIOKeyframeConstPtr keyframe_msg = NULL;
 
         // find out the messages with same time stamp
         m_buf.lock();
@@ -370,7 +370,7 @@ void process()
 
                 if (!keyframe_msg->loop_features.empty())
                 {
-                    for (const vins::LoopFeature &feature : keyframe_msg->loop_features)
+                    for (const fishloop_vins::LoopFeature &feature : keyframe_msg->loop_features)
                     {
                         point_3d.emplace_back(feature.point_w.x, feature.point_w.y, feature.point_w.z);
                         point_2d_uv.emplace_back(feature.raw_uv.x, feature.raw_uv.y);
@@ -462,8 +462,8 @@ int main(int argc, char **argv)
 
     if(argc != 2)
     {
-        printf("please intput: rosrun loop_fusion loop_fusion_node [config file] \n"
-               "for example: rosrun loop_fusion loop_fusion_node "
+        printf("please intput: rosrun fishloop loop_fusion_node [config file] \n"
+               "for example: rosrun fishloop loop_fusion_node "
                "/home/tony-ws1/catkin_ws/src/VINS-Fusion/config/euroc/euroc_stereo_imu_config.yaml \n");
         return 0;
     }

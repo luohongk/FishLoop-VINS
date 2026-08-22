@@ -1,5 +1,5 @@
 <launch>
-    <arg name="config_file" default="$(find vins)/../config/vins_fisheye_loop/stereo_imu_config.yaml" />
+    <arg name="config_file" default="$(find fishloop_vins)/../config/vins_fisheye_loop/stereo_imu_config.yaml" />
     <arg name="viz"         default="true" />
     <arg name="tracking_viz" default="true" />
     <!-- Physical input topics. Defaults preserve the standardized VINS
@@ -8,7 +8,7 @@
     <arg name="input_right_topic" default="/cam1/image/compressed" />
 
     <!-- Stereo fisheye tracking + VINS trajectory visualizer -->
-    <node pkg="vins" type="viz_fisheye_tracking.py" name="viz_fisheye_tracking"
+    <node pkg="fishloop_vins" type="viz_fisheye_tracking.py" name="viz_fisheye_tracking"
           output="screen" if="$(arg tracking_viz)">
         <param name="left_topic"       type="string" value="$(arg input_left_topic)"/>
         <param name="right_topic"      type="string" value="$(arg input_right_topic)"/>
@@ -24,10 +24,10 @@
         <param name="output_topic"     type="string" value="/vins/fisheye_track"/>
         <param name="path_topic"       type="string" value="/vins_estimator/path"/>
         <param name="odom_topic"       type="string" value="/vins_estimator/odometry"/>
-        <param name="mask_path"        type="string" value="$(find vins)/../config/vins_fisheye_loop/fisheye_mask.png"/>
+        <param name="mask_path"        type="string" value="$(find fishloop_vins)/../config/vins_fisheye_loop/fisheye_mask.png"/>
     </node>
 
-    <node pkg="vins" type="vins_node_fisheye" name="vins_estimator" output="screen">
+    <node pkg="fishloop_vins" type="fishloop_vins_node_fisheye" name="vins_estimator" output="screen">
         <param name="config_file" type="string" value="$(arg config_file)"/>
         <param name="fisheye_external_flatten" type="bool" value="false"/>
         <remap from="/cam0/image/compressed" to="$(arg input_left_topic)"/>
@@ -35,9 +35,9 @@
     </node>
 
     <arg name="loop_fusion"        default="true" />
-    <arg name="loop_config_file"   default="$(find vins)/../config/vins_fisheye_loop/loop_fusion_config.yaml" />
-    <node pkg="loop_fusion" type="loop_fusion_node" name="loop_fusion"
+    <arg name="loop_config_file"   default="$(find fishloop_vins)/../config/vins_fisheye_loop/loop_fusion_config.yaml" />
+    <node pkg="fishloop" type="loop_fusion_node" name="loop_fusion"
           args="$(arg loop_config_file)" output="screen" if="$(arg loop_fusion)" />
 
-    <include file="$(find vins)/launch/vins_rviz.launch" if="$(arg viz)" />
+    <include file="$(find fishloop_vins)/launch/vins_rviz.launch" if="$(arg viz)" />
 </launch>

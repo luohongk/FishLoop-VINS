@@ -221,8 +221,8 @@ int main(int argc, char **argv)
     cv::setNumThreads(1);
     if(argc != 2)
     {
-        printf("please intput: rosrun vins vins_node [config file] \n"
-               "for example: rosrun vins vins_node "
+        printf("please intput: rosrun fishloop_vins vins_node [config file] \n"
+               "for example: rosrun fishloop_vins vins_node "
                "~/catkin_ws/src/VINS-Fusion/config/euroc/euroc_stereo_imu_config.yaml \n");
         return 1;
     }

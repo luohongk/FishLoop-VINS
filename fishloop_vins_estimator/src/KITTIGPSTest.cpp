@@ -36,8 +36,8 @@ int main(int argc, char** argv)
 
 	if(argc != 3)
 	{
-		printf("please intput: rosrun vins kitti_gps_test [config file] [data folder] \n"
-			   "for example: rosrun vins kitti_gps_test "
+		printf("please intput: rosrun fishloop_vins kitti_gps_test [config file] [data folder] \n"
+			   "for example: rosrun fishloop_vins kitti_gps_test "
 			   "~/catkin_ws/src/VINS-Fusion/config/kitti_raw/kitti_10_03_config.yaml "
 			   "/media/tony-ws1/disk_D/kitti/2011_10_03/2011_10_03_drive_0027_sync/ \n");
 		return 1;
@@ -187,4 +187,3 @@ int main(int argc, char** argv)
 		fclose (outFile);
 	return 0;
 }
-

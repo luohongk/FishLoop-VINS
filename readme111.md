@@ -21,7 +21,7 @@ catkin_make -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -j8
 
 ```
 source ~/catkin_ws/devel/setup.bash
-roslaunch vins vins_fisheye_loop.launch
+roslaunch fishloop_vins vins_fisheye_loop.launch
 ```
 
 终端2：

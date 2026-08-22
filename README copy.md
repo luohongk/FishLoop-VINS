@@ -130,16 +130,16 @@ catkin_make -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -j8
 
 ```
 source ~/catkin_ws/devel/setup.bash
-roslaunch vins my_kalibr_fisheye.launch
+roslaunch fishloop_vins my_kalibr_fisheye.launch
 ```
 
 ```
 source ~/catkin_ws/devel/setup.bash
-roslaunch vins my_4cam_kalibr_fisheye.launch
+roslaunch fishloop_vins my_4cam_kalibr_fisheye.launch
 ```
 
   catkin_make && source devel/setup.bash
-  roslaunch vins my_kalibr_fisheye.launch
+  roslaunch fishloop_vins my_kalibr_fisheye.launch
 
 # Terminal 2
 
@@ -216,9 +216,9 @@ Term 1
 
 ```bash
 #If use CUDA
-roslaunch vins fisheye_split.launch config_file:=/home/your_name/your_ws/src/VINS-Fusion-Fisheye/config/fisheye_ptgrey_n3/fisheye_cuda.yaml
+roslaunch fishloop_vins fisheye_split.launch config_file:=/home/your_name/your_ws/src/VINS-Fusion-Fisheye/config/fisheye_ptgrey_n3/fisheye_cuda.yaml
 #If use CPU
-roslaunch vins fisheye_split.launch config_file:=/home/your_name/your_ws/src/VINS-Fusion-Fisheye/config/fisheye_ptgrey_n3/fisheye_cpu.yaml
+roslaunch fishloop_vins fisheye_split.launch config_file:=/home/your_name/your_ws/src/VINS-Fusion-Fisheye/config/fisheye_ptgrey_n3/fisheye_cpu.yaml
 ```
 
 Term 2
@@ -230,7 +230,7 @@ rosbag play fishey_vins_2020-01-30-10-38-14.bag --clock -s 12
 Term 3(for visuallization only)
 
 ```bash
-roslaunch vins vins_rviz.launch
+roslaunch fishloop_vins vins_rviz.launch
 ```
 
 GPU is default enabled, if you are not using CUDA, disable it in yaml config file.
@@ -370,27 +370,27 @@ Green path is VIO odometry; red path is odometry under visual loop closure.
 ### 3.1 Monocualr camera + IMU
 
 ```
-    roslaunch vins vins_rviz.launch
-    rosrun vins vins_node ~/catkin_ws/src/VINS-Fusion/config/euroc/euroc_mono_imu_config.yaml 
-    (optional) rosrun loop_fusion loop_fusion_node ~/catkin_ws/src/VINS-Fusion/config/euroc/euroc_mono_imu_config.yaml 
+    roslaunch fishloop_vins vins_rviz.launch
+    rosrun fishloop_vins vins_node ~/catkin_ws/src/VINS-Fusion/config/euroc/euroc_mono_imu_config.yaml
+    (optional) rosrun fishloop loop_fusion_node ~/catkin_ws/src/VINS-Fusion/config/euroc/euroc_mono_imu_config.yaml
     rosbag play YOUR_DATASET_FOLDER/MH_01_easy.bag
 ```
 
 ### 3.2 Stereo cameras + IMU
 
 ```
-    roslaunch vins vins_rviz.launch
-    rosrun vins vins_node ~/catkin_ws/src/VINS-Fusion/config/euroc/euroc_stereo_imu_config.yaml 
-    (optional) rosrun loop_fusion loop_fusion_node ~/catkin_ws/src/VINS-Fusion/config/euroc/euroc_stereo_imu_config.yaml 
+    roslaunch fishloop_vins vins_rviz.launch
+    rosrun fishloop_vins vins_node ~/catkin_ws/src/VINS-Fusion/config/euroc/euroc_stereo_imu_config.yaml
+    (optional) rosrun fishloop loop_fusion_node ~/catkin_ws/src/VINS-Fusion/config/euroc/euroc_stereo_imu_config.yaml
     rosbag play YOUR_DATASET_FOLDER/MH_01_easy.bag
 ```
 
 ### 3.3 Stereo cameras
 
 ```
-    roslaunch vins vins_rviz.launch
-    rosrun vins vins_node ~/catkin_ws/src/VINS-Fusion/config/euroc/euroc_stereo_config.yaml 
-    (optional) rosrun loop_fusion loop_fusion_node ~/catkin_ws/src/VINS-Fusion/config/euroc/euroc_stereo_config.yaml 
+    roslaunch fishloop_vins vins_rviz.launch
+    rosrun fishloop_vins vins_node ~/catkin_ws/src/VINS-Fusion/config/euroc/euroc_stereo_config.yaml
+    (optional) rosrun fishloop loop_fusion_node ~/catkin_ws/src/VINS-Fusion/config/euroc/euroc_stereo_config.yaml
     rosbag play YOUR_DATASET_FOLDER/MH_01_easy.bag
 ```
 
@@ -405,9 +405,9 @@ Open two terminals, run vins and rviz respectively.
 (We evaluated odometry on KITTI benchmark without loop closure funtion)
 
 ```
-    roslaunch vins vins_rviz.launch
-    (optional) rosrun loop_fusion loop_fusion_node ~/catkin_ws/src/VINS-Fusion/config/kitti_odom/kitti_config00-02.yaml
-    rosrun vins kitti_odom_test ~/catkin_ws/src/VINS-Fusion/config/kitti_odom/kitti_config00-02.yaml YOUR_DATASET_FOLDER/sequences/00/ 
+    roslaunch fishloop_vins vins_rviz.launch
+    (optional) rosrun fishloop loop_fusion_node ~/catkin_ws/src/VINS-Fusion/config/kitti_odom/kitti_config00-02.yaml
+    rosrun fishloop_vins kitti_odom_test ~/catkin_ws/src/VINS-Fusion/config/kitti_odom/kitti_config00-02.yaml YOUR_DATASET_FOLDER/sequences/00/
 ```
 
 ### 4.2 KITTI GPS Fusion (Stereo + GPS)
@@ -417,8 +417,8 @@ Open three terminals, run vins, global fusion and rviz respectively.
 Green path is VIO odometry; blue path is odometry under GPS global fusion.
 
 ```
-    roslaunch vins vins_rviz.launch
-    rosrun vins kitti_gps_test ~/catkin_ws/src/VINS-Fusion/config/kitti_raw/kitti_10_03_config.yaml YOUR_DATASET_FOLDER/2011_10_03_drive_0027_sync/ 
+    roslaunch fishloop_vins vins_rviz.launch
+    rosrun fishloop_vins kitti_gps_test ~/catkin_ws/src/VINS-Fusion/config/kitti_raw/kitti_10_03_config.yaml YOUR_DATASET_FOLDER/2011_10_03_drive_0027_sync/
     rosrun global_fusion global_fusion_node
 ```
 
@@ -431,9 +431,9 @@ Open four terminals, run vins odometry, visual loop closure(optional), rviz and 
 Green path is VIO odometry; red path is odometry under visual loop closure.
 
 ```
-    roslaunch vins vins_rviz.launch
-    rosrun vins vins_node ~/catkin_ws/src/VINS-Fusion/config/vi_car/vi_car.yaml 
-    (optional) rosrun loop_fusion loop_fusion_node ~/catkin_ws/src/VINS-Fusion/config/vi_car/vi_car.yaml 
+    roslaunch fishloop_vins vins_rviz.launch
+    rosrun fishloop_vins vins_node ~/catkin_ws/src/VINS-Fusion/config/vi_car/vi_car.yaml
+    (optional) rosrun fishloop loop_fusion_node ~/catkin_ws/src/VINS-Fusion/config/vi_car/vi_car.yaml
     rosbag play YOUR_DATASET_FOLDER/car.bag
 ```
 

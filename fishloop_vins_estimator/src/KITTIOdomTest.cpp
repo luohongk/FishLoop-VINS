@@ -39,8 +39,8 @@ int main(int argc, char** argv)
 
 	if(argc != 3)
 	{
-		printf("please intput: rosrun vins kitti_odom_test [config file] [data folder] \n"
-			   "for example: rosrun vins kitti_odom_test "
+		printf("please intput: rosrun fishloop_vins kitti_odom_test [config file] [data folder] \n"
+			   "for example: rosrun fishloop_vins kitti_odom_test "
 			   "~/catkin_ws/src/VINS-Fusion/config/kitti_odom/kitti_config00-02.yaml "
 			   "/media/tony-ws1/disk_D/kitti/odometry/sequences/00/ \n");
 		return 1;

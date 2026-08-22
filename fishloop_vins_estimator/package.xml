@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <package>
-  <name>vins</name>
+  <name>fishloop_vins</name>
   <version>0.0.0</version>
-  <description>The vins package for fisheye</description>
+  <description>The FishLoop VINS package for fisheye cameras</description>
 
   <maintainer email="xuhao3e8@gmail.com">xuhao3e8</maintainer>
 

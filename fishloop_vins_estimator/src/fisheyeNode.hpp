@@ -9,7 +9,7 @@
 #include "utility/tic_toc.h"
 
 #include <boost/thread.hpp>
-#include "vins/FlattenImages.h"
+#include "fishloop_vins/FlattenImages.h"
 
 #include "utility/opencv_cuda.h"
 #include "utility/ros_utility.h"
@@ -85,7 +85,7 @@ class FisheyeFlattenHandler
             cv::Mat *full_left_undist_gray = nullptr
         );
 
-        void setup_extrinsic(vins::FlattenImages & images, const Estimator & estimator);
+        void setup_extrinsic(fishloop_vins::FlattenImages & images, const Estimator & estimator);
 
         void pack_and_send(ros::Time stamp, 
             cv::InputArray fisheye_up_imgs, cv::InputArray fisheye_down_imgs, 

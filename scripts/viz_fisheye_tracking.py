@@ -25,7 +25,7 @@ Trail tails fade out. Mask is applied to the image FIRST and the eroded
 inner region is used for detection (so no spurious corners on the mask
 boundary).
 
-Usage:  rosrun vins viz_fisheye_tracking.py _<param>:=<value> ...
+Usage:  rosrun fishloop_vins viz_fisheye_tracking.py _<param>:=<value> ...
         (the auto-generated launch file plumbs everything for you)
 """
 from __future__ import annotations

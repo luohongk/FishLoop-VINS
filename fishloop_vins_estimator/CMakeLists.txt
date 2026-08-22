@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 2.8.3)
-project(vins)
+project(fishloop_vins)
 
 set(CMAKE_BUILD_TYPE "Release")
 set(CMAKE_CXX_FLAGS "-std=c++14 -fopenmp")
@@ -157,7 +157,7 @@ add_library(fisheyeNode_lib SHARED
 
 target_link_libraries(vins_lib ${catkin_LIBRARIES} ${OpenCV_LIBS} ${CERES_LIBRARIES} ${LIBDW})
 target_link_libraries(vins_params_lib ${catkin_LIBRARIES} ${OpenCV_LIBS} ${CERES_LIBRARIES} ${LIBDW})
-add_dependencies(vins_lib vins_generate_messages_cpp)
+add_dependencies(vins_lib ${PROJECT_NAME}_generate_messages_cpp)
 target_link_libraries(stereo_depth ${catkin_LIBRARIES} ${OpenCV_LIBS} ${VisionWorks_LIBRARIES} ${LIBSGM} ${LIBDW} ${CUDA_LIBRARIES})
 target_link_libraries(vins_frontend ${catkin_LIBRARIES} ${OpenCV_LIBS} ${VisionWorks_LIBRARIES} ${LIBDW} OpenMP::OpenMP_CXX)
 target_link_libraries(estimator_lib vins_params_lib vins_lib stereo_depth ${catkin_LIBRARIES} ${OpenCV_LIBS} ${VisionWorks_LIBRARIES} ${LIBDW})
@@ -167,13 +167,13 @@ target_link_libraries(fisheyeNode_lib ${catkin_LIBRARIES} ${OpenCV_LIBS} ${Visio
 #add_executable(vins_node src/rosNodeTest.cpp)
 #target_link_libraries(vins_node vins_lib estimator_lib vins_frontend stereo_depth vins_factors_lib vins_params_lib)
 
-add_executable(vins_node_fisheye src/rosNodeFisheye.cpp)
-target_link_libraries(vins_node_fisheye vins_lib fisheyeNode_lib estimator_lib vins_frontend stereo_depth vins_factors_lib vins_params_lib)
+add_executable(fishloop_vins_node_fisheye src/rosNodeFisheye.cpp)
+target_link_libraries(fishloop_vins_node_fisheye vins_lib fisheyeNode_lib estimator_lib vins_frontend stereo_depth vins_factors_lib vins_params_lib)
 
 add_library(vins_nodelet_lib src/rosNodelet.cpp)
 target_link_libraries(vins_nodelet_lib vins_lib fisheyeNode_lib estimator_lib vins_frontend stereo_depth vins_factors_lib vins_params_lib OpenMP::OpenMP_CXX)
 
-# Install python helper scripts so `rosrun vins pad_fisheye_node.py` works.
+# Install python helper scripts so `rosrun fishloop_vins pad_fisheye_node.py` works.
 # We bypass catkin_install_python because, on a fresh build, it tries to
 # write into ${CMAKE_CURRENT_BINARY_DIR}/catkin_generated/installspace/
 # before catkin has created that directory, causing

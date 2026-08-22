@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <package>
-  <name>loop_fusion</name>
+  <name>fishloop</name>
   <version>0.0.0</version>
   <description>loop_fusion package</description>
 
@@ -41,9 +41,9 @@
   <!--   <test_depend>gtest</test_depend> -->
   <buildtool_depend>catkin</buildtool_depend>
   <build_depend>camera_models</build_depend>
-  <build_depend>vins</build_depend>
+  <build_depend>fishloop_vins</build_depend>
   <run_depend>camera_models</run_depend>
-  <run_depend>vins</run_depend>
+  <run_depend>fishloop_vins</run_depend>
 
 
 

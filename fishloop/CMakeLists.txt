@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 2.8.3)
-project(loop_fusion)
+project(fishloop)
 
 set(CMAKE_BUILD_TYPE "Release")
 set(CMAKE_CXX_FLAGS "-std=c++11")
@@ -13,7 +13,7 @@ find_package(catkin REQUIRED COMPONENTS
     camera_models
     cv_bridge
     roslib
-    vins
+    fishloop_vins
     )
 
 find_package(OpenCV)

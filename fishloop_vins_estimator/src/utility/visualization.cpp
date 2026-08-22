@@ -8,9 +8,9 @@
  *******************************************************/
 
 #include "visualization.h"
-#include <vins/VIOKeyframe.h>
+#include <fishloop_vins/VIOKeyframe.h>
 #include <sensor_msgs/PointCloud.h>
-#include <vins/FlattenImages.h>
+#include <fishloop_vins/FlattenImages.h>
 #include "cv_bridge/cv_bridge.h"
 #include <camodocal/camera_models/CameraFactory.h>
 #include "../utility/ros_utility.h"
@@ -53,7 +53,7 @@ struct KeyframePublication
 {
     nav_msgs::Odometry pose;
     sensor_msgs::PointCloud points;
-    vins::VIOKeyframe vio_keyframe;
+    fishloop_vins::VIOKeyframe vio_keyframe;
     sensor_msgs::Image image;
     bool has_image = false;
 };
@@ -100,9 +100,9 @@ void registerPub(ros::NodeHandle &n)
     pub_keyframe_point = n.advertise<sensor_msgs::PointCloud>("keyframe_point", 1000);
     pub_keyframe_image = n.advertise<sensor_msgs::Image>("keyframe_image", 1000);
     pub_extrinsic = n.advertise<nav_msgs::Odometry>("extrinsic", 1000);
-    pub_viokeyframe = n.advertise<vins::VIOKeyframe>("viokeyframe", 1000);
-    pub_viononkeyframe = n.advertise<vins::VIOKeyframe>("viononkeyframe", 1000);
-    pub_flatten_images = n.advertise<vins::FlattenImages>("flatten_images", 1000);
+    pub_viokeyframe = n.advertise<fishloop_vins::VIOKeyframe>("viokeyframe", 1000);
+    pub_viononkeyframe = n.advertise<fishloop_vins::VIOKeyframe>("viononkeyframe", 1000);
+    pub_flatten_images = n.advertise<fishloop_vins::FlattenImages>("flatten_images", 1000);
     pub_bias = n.advertise<sensor_msgs::Imu>("imu_bias", 1000);
 
     cameraposevisual.setScale(0.1);
@@ -239,7 +239,7 @@ void pubOdometry(const Estimator &estimator, const std_msgs::Header &header)
         printf("time: %f, t: %5.3f %5.3f %5.3f q: %4.2f %4.2f %4.2f %4.2f td: %3.1fms\n", header.stamp.toSec(), tmp_T.x(), tmp_T.y(), tmp_T.z(),
                                                           tmp_Q.w(), tmp_Q.x(), tmp_Q.y(), tmp_Q.z(), estimator.td*1000);
 
-        vins::VIOKeyframe vkf;
+        fishloop_vins::VIOKeyframe vkf;
         vkf.header = header;
         int i = WINDOW_SIZE;
         Vector3d P = estimator.Ps[i];
@@ -556,7 +556,7 @@ bool buildKeyframePublication(const Estimator &estimator, KeyframePublication &p
     const Quaterniond R(estimator.Rs[keyframe_index]);
     nav_msgs::Odometry &odometry = publication.pose;
     sensor_msgs::PointCloud &point_cloud = publication.points;
-    vins::VIOKeyframe &vkf = publication.vio_keyframe;
+    fishloop_vins::VIOKeyframe &vkf = publication.vio_keyframe;
 
     odometry.header.stamp = ros::Time(estimator.Headers[keyframe_index]);
     odometry.header.frame_id = "world";
@@ -657,7 +657,7 @@ bool buildKeyframePublication(const Estimator &estimator, KeyframePublication &p
             vkf.feature_points_2d_norm.push_back(fp2d_norm);
             vkf.feature_points_flag.push_back(it_per_id.solve_flag);
 
-            vins::LoopFeature loop_feature;
+            fishloop_vins::LoopFeature loop_feature;
             loop_feature.feature_id = it_per_id.feature_id;
             loop_feature.camera_id = camera_id;
             loop_feature.view_id = -1;

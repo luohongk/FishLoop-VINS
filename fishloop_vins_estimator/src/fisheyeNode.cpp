@@ -129,8 +129,8 @@ FisheyeFlattenHandler::FisheyeFlattenHandler(ros::NodeHandle & n, bool _is_color
 
     readIntrinsicParameter(CAM_NAMES);
 
-    flatten_pub = n.advertise<vins::FlattenImages>("/vins_estimator/flattened_raw", 1);
-    flatten_gray_pub = n.advertise<vins::FlattenImages>("/vins_estimator/flattened_gray", 1);
+    flatten_pub = n.advertise<fishloop_vins::FlattenImages>("/vins_estimator/flattened_raw", 1);
+    flatten_gray_pub = n.advertise<fishloop_vins::FlattenImages>("/vins_estimator/flattened_gray", 1);
     raw_left_pub = n.advertise<sensor_msgs::Image>("/vins_estimator/fisheye/left/image_raw", 1);
     raw_right_pub = n.advertise<sensor_msgs::Image>("/vins_estimator/fisheye/right/image_raw", 1);
     raw_stereo_pub = n.advertise<sensor_msgs::Image>("/vins_estimator/fisheye/stereo/image_raw", 1);
@@ -446,7 +446,7 @@ double FisheyeFlattenHandler::pop_from_buffer(
     return -1;
 }
 
-void FisheyeFlattenHandler::setup_extrinsic(vins::FlattenImages & images, const Estimator & estimator) {
+void FisheyeFlattenHandler::setup_extrinsic(fishloop_vins::FlattenImages & images, const Estimator & estimator) {
     static Eigen::Quaterniond t_left = Eigen::Quaterniond(Eigen::AngleAxisd(-M_PI / 2, Eigen::Vector3d(1, 0, 0)));
     static Eigen::Quaterniond t_down = Eigen::Quaterniond(Eigen::AngleAxisd(M_PI, Eigen::Vector3d(1, 0, 0)));
 
@@ -472,8 +472,8 @@ void FisheyeFlattenHandler::pack_and_send(ros::Time stamp,
         cv::InputArray fisheye_up_imgs_gray, cv::InputArray fisheye_down_imgs_gray, 
         const Estimator & estimator) {
     TicToc t_p;
-    vins::FlattenImages images;
-    vins::FlattenImages images_gray;
+    fishloop_vins::FlattenImages images;
+    fishloop_vins::FlattenImages images_gray;
     static double pack_send_time = 0;
 
     setup_extrinsic(images, estimator);

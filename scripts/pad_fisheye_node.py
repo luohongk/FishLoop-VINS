@@ -14,14 +14,14 @@ restores the geometry assumed by FisheyeUndist; the padded regions are
 just black (no information is invented).
 
 Usage (run two instances, one per camera):
-    rosrun vins pad_fisheye_node.py \
+    rosrun fishloop_vins pad_fisheye_node.py \
         _input:=/fisheye/left/image_raw/compressed \
         _output:=/fisheye/left/image_padded \
         _input_compressed:=true \
         _pad_top:=360 _pad_bottom:=360
 
 Or via the auto-generated launch file:
-    roslaunch vins my_kalibr_fisheye.launch
+    roslaunch fishloop_vins my_kalibr_fisheye.launch
 """
 from __future__ import annotations
 
