@@ -1,0 +1,102 @@
+# =============================================================================
+# docker-compose.yml for VINS-Fisheye
+#
+# Two services, selected by Compose profile:
+#   * cpu  -> docker/Dockerfile_CPU   (Noetic + system OpenCV 4.2)
+#   * gpu  -> docker/Dockerfile_GPU   (Noetic + OpenCV 4.5.5 + CUDA 11.6)
+#
+# Usage:
+#   # Build only
+#   docker compose --profile cpu build
+#   docker compose --profile gpu build
+#
+#   # Build + start an interactive container
+#   docker compose --profile cpu run --rm cpu
+#   docker compose --profile gpu run --rm gpu
+#
+#   # Long-running (detached) — useful when you want to docker exec in repeatedly
+#   docker compose --profile gpu up -d gpu
+#   docker compose exec gpu bash
+#
+#   # GPU build with a specific arch (RTX 30 = 8.6, RTX 40 = 8.9, etc.)
+#   CUDA_ARCH=8.6 docker compose --profile gpu build
+#
+#   # Tear everything down
+#   docker compose --profile gpu down
+#
+# Prereqs for the GPU profile:
+#   * NVIDIA driver on host
+#   * NVIDIA Container Toolkit (`nvidia-ctk` / `nvidia-container-runtime`)
+#   * Run `xhost +local:root` on host before starting if you want rviz/GUI
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # CPU-only build  (laptops without NVIDIA GPU, CI, dev boxes)
+  # ---------------------------------------------------------------------------
+  cpu:
+    profiles: ["cpu"]
+    image: vins-fisheye:cpu
+    container_name: vins-fisheye-cpu
+    build:
+      context: .
+      dockerfile: docker/Dockerfile_CPU
+    network_mode: host
+    ipc: host
+    stdin_open: true
+    tty: true
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - ROS_HOSTNAME=localhost
+      - ROS_MASTER_URI=http://localhost:11311
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # Mount the source so edits on the host show up in the container without
+      # rebuilding.  Comment out if you prefer the image-baked source only.
+      - ./:/root/catkin_ws/src/VINS-Fisheye:rw
+      # Place rosbags / datasets here on the host.
+      - ./data:/root/data:rw
+    working_dir: /root/catkin_ws
+    command: bash
+
+  # ---------------------------------------------------------------------------
+  # GPU / CUDA build  (recommended for real-time performance)
+  # ---------------------------------------------------------------------------
+  gpu:
+    profiles: ["gpu"]
+    image: vins-fisheye:gpu
+    container_name: vins-fisheye-gpu
+    build:
+      context: .
+      dockerfile: docker/Dockerfile_GPU
+      args:
+        # Override on host with: CUDA_ARCH=8.6 docker compose --profile gpu build
+        CUDA_ARCH: ${CUDA_ARCH:-7.5}
+        OPENCV_VERSION: ${OPENCV_VERSION:-4.5.5}
+        CUDA_VER: ${CUDA_VER:-11-6}
+    network_mode: host
+    ipc: host
+    stdin_open: true
+    tty: true
+    runtime: nvidia        # works with older docker-compose / nvidia-docker2
+    deploy:                # works with newer docker compose v2+ / nvidia-ctk
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, compute, utility, graphics, display]
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display
+      - ROS_HOSTNAME=localhost
+      - ROS_MASTER_URI=http://localhost:11311
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ./:/root/catkin_ws/src/VINS-Fisheye:rw
+      - ./data:/root/data:rw
+    working_dir: /root/catkin_ws
+    command: bash

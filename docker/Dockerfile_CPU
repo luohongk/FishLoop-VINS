@@ -1,0 +1,107 @@
+# =============================================================================
+# Dockerfile for VINS-Fisheye  (CPU-only variant, Noetic base)
+#   - Base : osrf/ros:noetic-desktop-full   (Ubuntu 20.04 + ROS Noetic inside)
+#   - No CUDA, no libSGM, no source-built OpenCV.
+#   - Uses the system OpenCV 4.2 that ships with Ubuntu 20.04 / ROS Noetic.
+#     cv_bridge in Noetic is also linked against OpenCV 4.2, so VINS and
+#     cv_bridge share the same OpenCV instance — zero ABI risk.
+#
+# Build is fast (~3-5 min) because there is no OpenCV / CUDA compilation.
+#
+# Trade-off: front-end runs on CPU + OpenMP, depth estimation falls back to
+# OpenCV SGBM (depth_cpu.yaml).  Suitable for laptops without an NVIDIA GPU
+# or for CI / dev boxes.
+#
+# VINS source modifications (applied via sed at build time):
+#   * `set(DETECT_CUDA true)`                  -> `false`   (force CPU branch)
+#   * `find_package(OpenCV 3[.4] REQUIRED ...)` -> `OpenCV 4 REQUIRED ...`
+#   * Hard-coded `OpenCV_DIR=/usr/local/share/OpenCV/` (OpenCV 3 layout)
+#     is commented out so cmake falls back to the system OpenCV 4 config at
+#     /usr/lib/x86_64-linux-gnu/cmake/opencv4.
+#
+# Compiled targets do not use any OpenCV-3-only macros (verified by grep).
+# `CV_LOAD_IMAGE_*` references in KITTI*Test.cpp are dead code (those files
+# are not added to any add_executable() / add_library() in CMakeLists.txt).
+#
+# Build:
+#   docker build -t vins-fisheye:cpu -f docker/Dockerfile_CPU .
+#
+# Run:
+#   xhost +local:root
+#   docker run -it --rm --net=host \
+#       --env="DISPLAY" --env="QT_X11_NO_MITSHM=1" \
+#       --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
+#       vins-fisheye:cpu
+# =============================================================================
+
+FROM osrf/ros:noetic-desktop-full
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
+# VINS-Fisheye + a few ROS pkgs declare `cmake_minimum_required(VERSION 2.8.3)`,
+# which cmake >= 4.0 refuses outright.  Focal apt ships cmake 3.16.3 today,
+# but apply this policy globally so any future cmake upgrade (or manual one)
+# inside the container still works.
+ENV CMAKE_POLICY_VERSION_MINIMUM=3.5
+SHELL ["/bin/bash", "-c"]
+
+# -----------------------------------------------------------------------------
+# 1. System / build dependencies + OpenCV from apt (4.2 on Focal)
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git wget curl unzip pkg-config \
+        ca-certificates gnupg2 lsb-release sudo \
+        software-properties-common \
+        libgoogle-glog-dev libgflags-dev \
+        libatlas-base-dev libsuitesparse-dev \
+        libeigen3-dev \
+        libboost-all-dev \
+        libdw-dev \
+        libgtk-3-dev \
+        libavcodec-dev libavformat-dev libswscale-dev \
+        libv4l-dev \
+        libjpeg-dev libpng-dev libtiff-dev \
+        libtbb2 libtbb-dev \
+        libceres-dev \
+        libopencv-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# 2. Catkin workspace + VINS-Fisheye source
+# -----------------------------------------------------------------------------
+ENV CATKIN_WS=/root/catkin_ws
+RUN mkdir -p ${CATKIN_WS}/src
+WORKDIR ${CATKIN_WS}/src
+
+# Build context = repo root.  Run with:  docker build ... -f docker/Dockerfile_CPU .
+COPY . ${CATKIN_WS}/src/VINS-Fisheye
+
+# vins_nodelet_pkg is referenced in package.xml but not bundled in this repo.
+RUN git clone https://github.com/HKUST-Swarm/vins_nodelet_pkg.git || true
+
+# -----------------------------------------------------------------------------
+# 3. Force CPU mode + bump the OpenCV version pin to 4
+# -----------------------------------------------------------------------------
+RUN cd ${CATKIN_WS}/src/VINS-Fisheye/vins_estimator && \
+    sed -i 's|^set(DETECT_CUDA true)|set(DETECT_CUDA false)|' CMakeLists.txt && \
+    sed -i -E 's|find_package\(OpenCV 3(\.4)? REQUIRED|find_package(OpenCV 4 REQUIRED|g' \
+        CMakeLists.txt && \
+    sed -i 's|^SET("OpenCV_DIR".*|# &|' CMakeLists.txt && \
+    echo "===== Patched CMakeLists.txt =====" && \
+    grep -nE 'DETECT_CUDA|find_package\(OpenCV|OpenCV_DIR' CMakeLists.txt
+
+# -----------------------------------------------------------------------------
+# 4. Build
+# -----------------------------------------------------------------------------
+WORKDIR ${CATKIN_WS}
+RUN source /opt/ros/noetic/setup.bash && \
+    catkin_make -DCMAKE_BUILD_TYPE=Release -j"$(nproc)"
+
+# -----------------------------------------------------------------------------
+# 5. Entry environment
+# -----------------------------------------------------------------------------
+RUN echo "source /opt/ros/noetic/setup.bash"    >> /root/.bashrc && \
+    echo "source ${CATKIN_WS}/devel/setup.bash" >> /root/.bashrc
+
+WORKDIR ${CATKIN_WS}
+CMD ["bash"]

@@ -1,0 +1,255 @@
+# =============================================================================
+# Dockerfile for VINS-Fisheye  (GPU / CUDA variant, Noetic base)
+#   - Base : osrf/ros:noetic-desktop-full   (Ubuntu 20.04 + ROS Noetic)
+#   - CUDA : 11.6 dev  (minimal subset, ~700 MB)
+#   - OpenCV : 4.5.5 from source, WITH_CUDA=ON, slim BUILD_LIST (no contrib)
+#   - libSGM : 3.0.0
+#
+# Why Noetic?  System cv_bridge is linked against OpenCV 4.x, so the VINS
+# node + cv_bridge share the same OpenCV major version (no double-loading
+# 3.x and 4.x in the same process).
+#
+# Why OpenCV 4.5.5 and NOT 4.2.0 (Ubuntu 20.04 system version)?
+#   * OpenCV 4.2.0 cmake does not understand CUDA 11's split nppi libraries
+#     (nppial / nppc / nppicc / ...).  Building 4.2.0 with CUDA 11 needs
+#     patches.  4.5.5 supports CUDA 11 natively.
+#   * 4.5.5 is ABI-compatible with the system 4.2 cv_bridge within the OpenCV
+#     4.x major.  cv::Mat passed across the boundary works fine in practice.
+#   * If you really need 4.2.0 (e.g. to match system SONAMEs exactly), set
+#     `--build-arg OPENCV_VERSION=4.2.0` and apply the well-known nppi patch
+#     to OpenCVDetectCUDA.cmake before the build step.
+#
+# VINS source modifications:
+#   * `CMakeLists.txt` is sed-patched so `find_package(OpenCV 3.4 ...)` is
+#     relaxed to `find_package(OpenCV 4 ...)`.  Verified by grep that the
+#     compiled targets do not use any OpenCV-3-only macros (`CV_AA`,
+#     `CV_BGR2GRAY`, `CV_LOAD_IMAGE_*`, etc.); the only such reference is in
+#     `KITTI*Test.cpp`, which is not in the build target list.
+#
+# Build:
+#   docker build -t vins-fisheye:gpu \
+#       --build-arg CUDA_ARCH=7.5 \
+#       -f docker/Dockerfile_GPU .
+#
+#   CUDA_ARCH presets (compile time scales ~linearly with how many you list):
+#       Pascal (GTX 10):     6.1
+#       Volta  (V100):       7.0
+#       Turing (RTX 20, T4): 7.5    <-- default
+#       Ampere (RTX 30, A): 8.6
+#       Ada    (RTX 40):     8.9
+#   Multiple values: --build-arg CUDA_ARCH="7.5;8.6"
+#
+# Run (host needs NVIDIA Container Toolkit):
+#   xhost +local:root
+#   docker run -it --rm --gpus all --net=host \
+#       --env="DISPLAY" --env="QT_X11_NO_MITSHM=1" \
+#       --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
+#       vins-fisheye:gpu
+# =============================================================================
+
+FROM osrf/ros:noetic-desktop-full
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
+SHELL ["/bin/bash", "-c"]
+
+# -----------------------------------------------------------------------------
+# 1. Basic system / build dependencies
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git wget curl unzip pkg-config \
+        ca-certificates gnupg2 lsb-release sudo \
+        software-properties-common \
+        libgoogle-glog-dev libgflags-dev \
+        libatlas-base-dev libsuitesparse-dev \
+        libeigen3-dev \
+        libboost-all-dev \
+        libdw-dev \
+        libgtk-3-dev \
+        libavcodec-dev libavformat-dev libswscale-dev \
+        libv4l-dev \
+        libjpeg-dev libpng-dev libtiff-dev \
+        libtbb2 libtbb-dev \
+        libceres-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# 2. CUDA 11.6 dev toolkit (minimal subset, ~700 MB instead of ~3 GB)
+#    cuFFT is included because OpenCV 4.x's `cudev` / `core` / `cudaarithm`
+#    modules all link against it unconditionally (cmake fails with
+#    `CUDA_cufft_LIBRARY (ADVANCED) ... NOTFOUND` if it is missing).
+# -----------------------------------------------------------------------------
+ARG CUDA_VER=11-6
+RUN wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-keyring_1.0-1_all.deb \
+        -O /tmp/cuda-keyring.deb && \
+    dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        cuda-nvcc-${CUDA_VER} \
+        cuda-cudart-dev-${CUDA_VER} \
+        cuda-driver-dev-${CUDA_VER} \
+        cuda-nvtx-${CUDA_VER} \
+        libcublas-dev-${CUDA_VER} \
+        libcufft-dev-${CUDA_VER} \
+        libcurand-dev-${CUDA_VER} \
+        libnpp-dev-${CUDA_VER} \
+        libcusparse-dev-${CUDA_VER} \
+        libcusolver-dev-${CUDA_VER} \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=${CUDA_HOME}/bin:${PATH}
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64
+
+# -----------------------------------------------------------------------------
+# 3. OpenCV 4.5.5 with CUDA  (slim build: no contrib, whitelisted modules)
+# -----------------------------------------------------------------------------
+ARG OPENCV_VERSION=4.5.5
+ARG CUDA_ARCH=7.5
+
+# Both opencv main AND opencv_contrib are required:
+#   * In OpenCV 4.x ALL `cuda*` modules (cudev, cudaarithm, cudaimgproc, ...)
+#     were moved out of main into opencv_contrib.  Without contrib + the
+#     OPENCV_EXTRA_MODULES_PATH below, `core/CMakeLists.txt` aborts with
+#     "CUDA: OpenCV requires enabled 'cudev' module from 'opencv_contrib'".
+WORKDIR /opt
+RUN wget -q https://github.com/opencv/opencv/archive/${OPENCV_VERSION}.zip -O opencv.zip && \
+    wget -q https://github.com/opencv/opencv_contrib/archive/${OPENCV_VERSION}.zip -O opencv_contrib.zip && \
+    unzip -q opencv.zip && unzip -q opencv_contrib.zip && \
+    rm opencv.zip opencv_contrib.zip && \
+    mv opencv-${OPENCV_VERSION} opencv && \
+    mv opencv_contrib-${OPENCV_VERSION} opencv_contrib
+
+# BUILD_LIST keeps only the modules VINS-Fisheye actually uses.  In OpenCV 4.x
+# the `cudev` and `cuda*` modules listed below are pulled from
+# OPENCV_EXTRA_MODULES_PATH=/opt/opencv_contrib/modules.
+RUN mkdir -p /opt/opencv/build && cd /opt/opencv/build && \
+    cmake -D CMAKE_BUILD_TYPE=Release \
+          -D CMAKE_INSTALL_PREFIX=/usr/local \
+          -D OPENCV_EXTRA_MODULES_PATH=/opt/opencv_contrib/modules \
+          -D BUILD_LIST="core,imgproc,imgcodecs,videoio,highgui,calib3d,features2d,flann,video,cudev,cudaarithm,cudaimgproc,cudawarping,cudafeatures2d,cudaoptflow,cudastereo,cudafilters,cudalegacy" \
+          -D WITH_CUDA=ON \
+          -D CUDA_ARCH_BIN="${CUDA_ARCH}" \
+          -D CUDA_ARCH_PTX="" \
+          -D ENABLE_FAST_MATH=ON \
+          -D CUDA_FAST_MATH=ON \
+          -D WITH_CUBLAS=ON \
+          -D WITH_TBB=ON \
+          -D WITH_V4L=ON \
+          -D WITH_QT=OFF \
+          -D WITH_GTK=ON \
+          -D WITH_OPENGL=ON \
+          -D WITH_OPENCL=OFF \
+          -D WITH_IPP=OFF \
+          -D WITH_PROTOBUF=OFF \
+          -D WITH_GSTREAMER=OFF \
+          -D BUILD_DOCS=OFF \
+          -D BUILD_EXAMPLES=OFF \
+          -D BUILD_TESTS=OFF \
+          -D BUILD_PERF_TESTS=OFF \
+          -D BUILD_JAVA=OFF \
+          -D BUILD_opencv_python2=OFF \
+          -D BUILD_opencv_python3=OFF \
+          -D BUILD_opencv_apps=OFF \
+          -D OPENCV_GENERATE_PKGCONFIG=ON \
+          .. && \
+    make -j16 && make install && ldconfig && \
+    rm -rf /opt/opencv /opt/opencv_contrib
+
+# -----------------------------------------------------------------------------
+# 4. CMake upgrade (libSGM 3.0.0 needs >= 3.18; Focal apt ships 3.16.3)
+#    Done in its own layer so it stays cached even when iterating on libSGM /
+#    catkin_make below.
+# -----------------------------------------------------------------------------
+RUN wget -qO - https://apt.kitware.com/keys/kitware-archive-latest.asc \
+        | gpg --dearmor -o /usr/share/keyrings/kitware-archive-keyring.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ focal main" \
+        > /etc/apt/sources.list.d/kitware.list && \
+    apt-get update && apt-get install -y --no-install-recommends cmake && \
+    rm -rf /var/lib/apt/lists/* && \
+    cmake --version
+
+# Kitware ships cmake >= 4.0 nowadays, which removed compatibility with
+# `cmake_minimum_required(VERSION < 3.5)`.  VINS-Fisheye and several ROS pkgs
+# still declare 2.8.3.  Setting this env var globally tells cmake to apply
+# 3.5-era policies to those legacy projects -- works for both the docker-build
+# `catkin_make` below AND any manual `catkin_make` you run inside the running
+# container after volume-mounting source.
+ENV CMAKE_POLICY_VERSION_MINIMUM=3.5
+
+# -----------------------------------------------------------------------------
+# 5. libSGM  (CUDA depth estimation backend used by VINS-Fisheye)
+# -----------------------------------------------------------------------------
+RUN cd /opt && git clone https://github.com/fixstars/libSGM.git && \
+    cd libSGM && git checkout 3.0.0 && \
+    mkdir build && cd build && \
+    cmake -D CMAKE_BUILD_TYPE=Release \
+          -D BUILD_OPENCV_WRAPPER=ON \
+          -D ENABLE_SAMPLES=OFF \
+          -D CMAKE_POSITION_INDEPENDENT_CODE=ON \
+          .. && \
+    make -j16 && make install && ldconfig && \
+    rm -rf /opt/libSGM
+
+# -----------------------------------------------------------------------------
+# 5b. backward-cpp (single-header stack-trace lib used when ENABLE_BACKWARD=ON
+#     in vins_estimator/CMakeLists.txt). VINS-Fisheye source #include's it as
+#     <backward.hpp>, so drop it directly into /usr/local/include.
+# -----------------------------------------------------------------------------
+RUN wget -q https://raw.githubusercontent.com/bombela/backward-cpp/master/backward.hpp \
+         -O /usr/local/include/backward.hpp
+
+# -----------------------------------------------------------------------------
+# 6. Catkin workspace + VINS-Fisheye source
+# -----------------------------------------------------------------------------
+ENV CATKIN_WS=/root/catkin_ws
+RUN mkdir -p ${CATKIN_WS}/src
+WORKDIR ${CATKIN_WS}/src
+
+COPY . ${CATKIN_WS}/src/VINS-Fisheye
+
+# vins_nodelet_pkg is referenced in package.xml but not bundled in this repo.
+RUN git clone https://github.com/HKUST-Swarm/vins_nodelet_pkg.git || true
+
+# vision_opencv (cv_bridge) overlay: the apt cv_bridge is hard-linked against
+# Ubuntu's apt OpenCV 4.2 (.so.4.2). When VINS-Fisheye links against our
+# /usr/local 4.5.5 build, ld emits "may conflict" warnings and runtime can hit
+# subtle ABI mismatches. Building cv_bridge from source against /usr/local
+# OpenCV makes everything use one copy.
+RUN git clone -b noetic https://github.com/ros-perception/vision_opencv.git && \
+    sed -i 's|^set(_opencv_version 4)|set(OpenCV_DIR /usr/local/lib/cmake/opencv4)\nset(_opencv_version 4)|' \
+        vision_opencv/cv_bridge/CMakeLists.txt && \
+    touch vision_opencv/opencv_tests/CATKIN_IGNORE
+
+# -----------------------------------------------------------------------------
+# 7. Patch VINS-Fisheye for OpenCV 4
+#    * Relax `find_package(OpenCV 3.4 ...)` / `find_package(OpenCV 3 ...)`
+#      to `find_package(OpenCV 4 ...)` so it picks up our /usr/local 4.5.5.
+#    * NB: we KEEP the in-tree `SET("OpenCV_DIR" "/usr/local/lib/cmake/opencv4")`
+#      because find_package(OpenCV) would otherwise pick the apt 4.2 first via
+#      cv_bridge's exported includes. The source already sets it to the OpenCV-4
+#      layout (/usr/local/lib/cmake/opencv4), so we no longer comment it out.
+# -----------------------------------------------------------------------------
+RUN cd ${CATKIN_WS}/src/VINS-Fisheye/vins_estimator && \
+    sed -i -E 's|find_package\(OpenCV 3(\.4)? REQUIRED|find_package(OpenCV 4 REQUIRED|g' \
+        CMakeLists.txt && \
+    echo "===== Patched find_package lines =====" && \
+    grep -nE 'find_package\(OpenCV|OpenCV_DIR' CMakeLists.txt
+
+# -----------------------------------------------------------------------------
+# 8. Build
+# -----------------------------------------------------------------------------
+#WORKDIR ${CATKIN_WS}
+#RUN source /opt/ros/noetic/setup.bash && \
+#    catkin_make -DCMAKE_BUILD_TYPE=Release -j16
+
+# -----------------------------------------------------------------------------
+# 9. Entry environment
+# -----------------------------------------------------------------------------
+RUN echo "source /opt/ros/noetic/setup.bash"         >> /root/.bashrc && \
+    echo "source ${CATKIN_WS}/devel/setup.bash"      >> /root/.bashrc
+
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display
+
+WORKDIR ${CATKIN_WS}
+CMD ["bash"]

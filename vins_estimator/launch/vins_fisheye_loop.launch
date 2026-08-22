@@ -1,0 +1,43 @@
+<launch>
+    <arg name="config_file" default="$(find vins)/../config/vins_fisheye_loop/stereo_imu_config.yaml" />
+    <arg name="viz"         default="true" />
+    <arg name="tracking_viz" default="true" />
+    <!-- Physical input topics. Defaults preserve the standardized VINS
+         interface; callers may point these directly at bag-native cam1/cam2. -->
+    <arg name="input_left_topic"  default="/cam0/image/compressed" />
+    <arg name="input_right_topic" default="/cam1/image/compressed" />
+
+    <!-- Stereo fisheye tracking + VINS trajectory visualizer -->
+    <node pkg="vins" type="viz_fisheye_tracking.py" name="viz_fisheye_tracking"
+          output="screen" if="$(arg tracking_viz)">
+        <param name="left_topic"       type="string" value="$(arg input_left_topic)"/>
+        <param name="right_topic"      type="string" value="$(arg input_right_topic)"/>
+        <param name="left_compressed"  type="bool"   value="true"/>
+        <param name="right_compressed" type="bool"   value="true"/>
+        <param name="display"          type="bool"   value="true"/>
+        <param name="show_width"       type="int"    value="1600"/>
+        <param name="traj_height"      type="int"    value="360"/>
+        <param name="header_height"    type="int"    value="44"/>
+        <param name="max_corners"      type="int"    value="200"/>
+        <param name="min_distance"     type="int"    value="25"/>
+        <param name="trail_length"     type="int"    value="12"/>
+        <param name="output_topic"     type="string" value="/vins/fisheye_track"/>
+        <param name="path_topic"       type="string" value="/vins_estimator/path"/>
+        <param name="odom_topic"       type="string" value="/vins_estimator/odometry"/>
+        <param name="mask_path"        type="string" value="$(find vins)/../config/vins_fisheye_loop/fisheye_mask.png"/>
+    </node>
+
+    <node pkg="vins" type="vins_node_fisheye" name="vins_estimator" output="screen">
+        <param name="config_file" type="string" value="$(arg config_file)"/>
+        <param name="fisheye_external_flatten" type="bool" value="false"/>
+        <remap from="/cam0/image/compressed" to="$(arg input_left_topic)"/>
+        <remap from="/cam1/image/compressed" to="$(arg input_right_topic)"/>
+    </node>
+
+    <arg name="loop_fusion"        default="true" />
+    <arg name="loop_config_file"   default="$(find vins)/../config/vins_fisheye_loop/loop_fusion_config.yaml" />
+    <node pkg="loop_fusion" type="loop_fusion_node" name="loop_fusion"
+          args="$(arg loop_config_file)" output="screen" if="$(arg loop_fusion)" />
+
+    <include file="$(find vins)/launch/vins_rviz.launch" if="$(arg viz)" />
+</launch>

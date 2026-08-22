@@ -1,0 +1,211 @@
+%YAML:1.0
+---
+#==========================================================
+# VINS-Fisheye 的 loop_fusion / 位姿图回环配置。
+#
+# 本 fisheye fork 的回环链路：
+#   1. 订阅 VINS 重发布的左右原始鱼眼图像；
+#   2. 为 EUCM 相机生成规范视图并提取 FAST + BRIEF；
+#   3. 十个规范视图分别作为 DBoW 文档，跨视图聚合候选并做连续帧投票；
+#   4. VIO 3D 点按 bearing 精确投到规范视图像素，原位计算 ORB；
+#   5. cam0/cam1 分别用 EUCM bearing 做 PnP，并检查两组 body pose 一致性。
+#
+# 因此不再依赖 cam0_pinhole_undist_full.yaml，也不订阅
+# /vins_estimator/keyframe_image。
+#==========================================================
+
+#========================
+# 基本输入/输出
+#========================
+
+# 是否按 VIO+IMU 的 4DoF 位姿图优化方式运行。
+# 1 = 使用 IMU/VIO yaw 约束，只优化 x/y/z/yaw；0 = 不使用 IMU 分支。
+imu: 1
+
+# 原始双目鱼眼图像由 VINS 按输入时间戳重新发布。loop_fusion 用它们生成
+# 2 cameras x 5 perspective views 的检索描述子，选出候选后回到原始 EUCM
+# 像素/bearing 上做几何验证。
+image0_topic: "/vins_estimator/fisheye/left/image_raw"
+image1_topic: "/vins_estimator/fisheye/right/image_raw"
+
+cam0_calib: "cam1_eucm.yaml"
+cam1_calib: "cam2_eucm.yaml"
+vio_config: "stereo_imu_config.yaml"
+
+# 原始 EUCM 图像尺寸。
+image_width: 1920
+image_height: 1200
+
+# 每台鱼眼生成 5 个规范针孔视图，两台相机共十个视图。
+loop_view_size: 320
+loop_view_fov_deg: 100.0
+loop_view_features: 300
+
+# 下列规范视图参数在 loop_retrieval_use_vio_features=0 时生效。
+# view 0 是与 cam0 光轴一致的 identity/front 视图。
+loop_retrieval_camera_count: 2
+loop_retrieval_view_count: 5
+
+# DBoW 使用规范视图上的密集 FAST+BRIEF。VIO window 只有约 100--150 个
+# 稀疏点，实测首尾真候选经常无法进入 top-K；几何验证仍由下面的 ORB+PnP
+# 独立完成，不会把密集检索点误当作 3D 对应点。
+loop_retrieval_use_vio_features: 0
+
+# OpenCV central PnP 使用 x/z,y/z；EUCM 提升后 z 太小或为负的边缘 bearing
+# 暂不进入 PnP。
+loop_eucm_min_z: 0.10
+
+# loop_fusion 结果输出目录。
+# 程序会把回环优化后的轨迹写到 <output_path>/vio_loop.csv。
+# 当前容器把本仓库挂载到 /root/catkin_ws/src/VINS-Fisheye。
+# 写到这里会出现在宿主机 /home/lhk/workspace/VINS-Fisheye/data。
+output_path: "/root/catkin_ws/src/VINS-Fisheye/data"
+
+# pose graph 保存目录。
+# 在 loop_fusion 终端按保存快捷键时会把 pose graph 写到这里。
+pose_graph_save_path: "/root/catkin_ws/src/VINS-Fisheye/data/pose_graph/"
+
+# 是否加载之前保存的 pose graph。
+# 0 = 每次从空图开始；1 = 启动时加载 pose_graph_save_path 下的历史图。
+load_previous_pose_graph: 0
+
+#========================
+# 回环候选检索参数：DBoW 层
+#========================
+
+# FAST 角点阈值，用于在“旧关键帧图像”上重新检测 BRIEF 特征。
+# 数值越小，角点越多，召回率更高但误匹配和计算量也更高。
+loop_fast_threshold: 20
+
+# DBoW 每次查询返回的候选数量上限。
+# 数值越大，进入后续 ORB/PnP 检查的候选更多，但计算量增加。
+loop_dbow_max_results: 12
+
+# DBoW 查询时跳过最近多少个 keyframe。
+# 只查询 index < 当前 index - loop_min_query_gap 的旧关键帧。
+# 如果回环发生得很快，可以减小；如果容易把近邻当回环，可以增大。
+# 本数据约 15 Hz；120 帧约等于 8 秒，可排除刚经过位置的局部近邻。
+loop_min_query_gap: 120
+
+# 最早从第几个 keyframe 开始允许检测回环。
+# 用于避免刚启动、关键帧太少时产生无意义候选。
+loop_min_detect_index: 50
+
+# 是否丢弃 estimator 发布的最初若干稳定关键帧。起终点回访通常正依赖
+# 这些画面，因此默认为 0；初始化不稳定帧由 estimator warmup 缓存负责隔离。
+loop_skip_first_keyframes: 0
+
+# DBoW 最佳候选最低分数。
+# ret[0].Score 低于该值时，不进入几何验证。
+# 降低可提高召回，但会增加误候选。
+# 这组 fisheye/full-undist keyframe 的首尾相似分数约 0.022~0.027；
+# 设为 0.020 才会进入后续 BRIEF/PnP 几何验证。
+loop_dbow_min_neighbor_score: 0.010
+
+# DBoW 被选中候选的最低分数。
+# 候选 Score 低于该值时丢弃。
+# 通常应小于等于 loop_dbow_min_neighbor_score。
+loop_dbow_min_candidate_score: 0.008
+
+# 诊断兼容通道：每隔 loop_force_first_interval 帧，把最早 N 个关键帧追加到
+# 几何候选中，不依赖 DBoW 是否召回。它可验证/弥补“真起点未进入 top-K”
+# 的问题；ORB+PnP 的严格内点、姿态和平移门槛仍会过滤假候选。确认 dense
+# DBoW 已能稳定召回后可把 loop_force_first_keyframes 设为 0。
+loop_force_first_keyframes: 0
+loop_force_first_interval: 5
+
+# 多视图检索结果必须在连续关键帧中重复落到相邻的历史关键帧簇，才进入
+# 几何验证。这样可抑制单帧纹理混淆，同时允许最佳 old frame 在邻近帧间漂移。
+loop_temporal_vote_frames: 3
+loop_temporal_vote_min_hits: 2
+loop_temporal_candidate_window: 5
+
+#========================
+# 回环几何验证参数：ORB/BRIEF + PnP 层
+#========================
+
+# BRIEF 描述子匹配的最大 Hamming 距离，范围大致 0-256。
+# 数值越大匹配越宽松，raw matches 更多但外点也更多。
+loop_brief_dist_threshold: 80
+
+# 最近邻与次近邻 Hamming 距离比值。只有 best < ratio * second-best
+# 才保留，随后还会执行双向互检和旧帧关键点一对一约束。
+# 0.80 是较稳健的初始值；若真回环召回不足，可依据日志逐步放宽到 0.85，
+# 不建议超过 0.90。
+loop_brief_ratio_threshold: 0.80
+
+# 使用旋转不变 ORB 做几何匹配：每个 VIO 点按 bearing 精确投影到其规范
+# 视图像素，并在该位置计算带方向 ORB，描述子始终直接绑定原 3D 点。
+loop_orb_geometry: 1
+loop_orb_features: 2500
+loop_orb_fast_threshold: 12
+loop_orb_dist_threshold: 64
+loop_orb_ratio_threshold: 0.85
+# 普通回环几何使用当前帧精确绑定3D的 VIO ORB，匹配旧关键帧在2×5个
+# 规范透视视图中均匀提取的 dense ORB。旧 dense 点只提供精确 EUCM bearing，
+# 不再把当前 dense 点按像素近邻绑定到 VIO 3D。
+loop_orb_exact_dense_dist_threshold: 72
+loop_orb_exact_dense_ratio_threshold: 0.90
+loop_orb_exact_dense_min_pnp_inliers: 14
+# 强制验证的早期关键帧同样使用 exact-current→dense-canonical-old，但允许
+# 使用单独的宽松描述子阈值和后续大 yaw 门限。
+loop_orb_dense_dist_threshold: 72
+loop_orb_dense_ratio_threshold: 0.90
+# 以下两个参数仅为旧 dense↔dense 分支的配置兼容项；新的 exact→dense
+# 路径不做跨规范视图的单一 homography，因为多个透视平面不存在统一单应。
+loop_orb_dense_min_geometric_inliers: 40
+loop_orb_dense_homography_threshold: 5.0
+# 强制早期候选仍必须通过 PnP RANSAC，因此可使用独立的最终内点门槛。
+loop_orb_dense_min_pnp_inliers: 10
+# 第二组 bag 首尾朝向相差约 103 度；只有显式强制的早期诊断候选允许
+# 大角度回环，普通 DBoW 候选仍使用下方 30 度限制。
+loop_orb_dense_max_yaw_deg: 150.0
+# 旧配置兼容项；exact-current→dense-old 不再使用像素近邻关联。
+loop_orb_association_radius: 10.0
+
+# 每台相机达到 6 个内点即可作为双相机约束的“贡献者”；双相机仍需总内点
+# 达到上面的 14，并通过位姿一致性检查。这样 8+6 不会因先丢掉 6 而误拒绝。
+loop_per_camera_min_inliers: 6
+# 若只有一台相机能稳定求解，则采用更强的绝对内点数和内点率门槛，避免
+# 为提高召回率而直接允许任意 6~8 内点的单相机假回环。
+loop_single_camera_min_inliers: 12
+loop_single_camera_min_inlier_ratio: 0.65
+loop_camera_consistency_rotation_deg: 15.0
+loop_camera_consistency_translation: 1.0
+
+# PnP 不使用当前漂移 VIO 位姿作为初值，而由 EPNP RANSAC 独立求解，
+# 再对内点做 iterative refinement。像素门限按 canonical-view 焦距换算，
+# 不能用原始 EUCM fx，否则本配置下门限会被错误压紧约 4.6 倍。
+loop_pnp_ransac_iterations: 300
+loop_pnp_reprojection_error_px: 10.0
+loop_pnp_confidence: 0.999
+
+# BRIEF / exact-to-exact 回退路径的内点阈值，和桌面版 loop_fusion111
+# 的 LOOP_MIN_LOOP_NUM 对齐。普通 exact-to-dense 路径使用上方独立的14内点门槛。
+loop_min_inliers: 30
+
+# PnP 得到的相对 yaw 最大允许值，单位度。
+# 超过该值即使几何匹配足够也会拒绝，防止姿态不合理的回环。
+loop_max_yaw_deg: 30.0
+
+# PnP 得到的相对平移最大允许值，单位米。
+# 真回环在本数据中的估计大多小于 1.5 m；初测出现 6~17 m 的可疑约束，
+# 因此使用 3 m 的保守上限。场景尺度明显更大时再有依据地放宽。
+loop_max_translation: 3.0
+
+#========================
+# 调试图像与可视化
+#========================
+
+# 是否保存/发布回环匹配调试图。
+# 1 = 保存到 pose_graph_save_path，并发布 /loop_fusion/match_image；
+# 0 = 不保存调试图。大场景建议关闭，否则每个 KeyFrame 会长期持有一张图像。
+save_image: 0
+
+# IMU 前向可视化偏移，单位像素/显示用。
+# 当前正常运行基本不使用，保留为 0。
+visualize_imu_forward: 0
+
+# RViz 中相机位姿标记的显示尺寸。
+# 只影响可视化，不影响回环检测或优化。
+visualize_camera_size: 0.4
