@@ -1,5 +1,5 @@
 # =============================================================================
-# Dockerfile for VINS-Fisheye  (GPU / CUDA variant, Noetic base)
+# Dockerfile for fishloop_vins  (GPU / CUDA variant, Noetic base)
 #   - Base : osrf/ros:noetic-desktop-full   (Ubuntu 20.04 + ROS Noetic)
 #   - CUDA : 11.6 dev  (minimal subset, ~700 MB)
 #   - OpenCV : 4.5.5 from source, WITH_CUDA=ON, slim BUILD_LIST (no contrib)
@@ -27,7 +27,7 @@
 #     `KITTI*Test.cpp`, which is not in the build target list.
 #
 # Build:
-#   docker build -t vins-fisheye:gpu \
+#   docker build -t fishloop_vins:gpu \
 #       --build-arg CUDA_ARCH=7.5 \
 #       -f docker/Dockerfile_GPU .
 #
@@ -44,7 +44,7 @@
 #   docker run -it --rm --gpus all --net=host \
 #       --env="DISPLAY" --env="QT_X11_NO_MITSHM=1" \
 #       --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
-#       vins-fisheye:gpu
+#       fishloop_vins:gpu
 # =============================================================================
 
 FROM osrf/ros:noetic-desktop-full
@@ -119,7 +119,7 @@ RUN wget -q https://github.com/opencv/opencv/archive/${OPENCV_VERSION}.zip -O op
     mv opencv-${OPENCV_VERSION} opencv && \
     mv opencv_contrib-${OPENCV_VERSION} opencv_contrib
 
-# BUILD_LIST keeps only the modules VINS-Fisheye actually uses.  In OpenCV 4.x
+# BUILD_LIST keeps only the modules fishloop_vins actually uses.  In OpenCV 4.x
 # the `cudev` and `cuda*` modules listed below are pulled from
 # OPENCV_EXTRA_MODULES_PATH=/opt/opencv_contrib/modules.
 RUN mkdir -p /opt/opencv/build && cd /opt/opencv/build && \
@@ -169,7 +169,7 @@ RUN wget -qO - https://apt.kitware.com/keys/kitware-archive-latest.asc \
     cmake --version
 
 # Kitware ships cmake >= 4.0 nowadays, which removed compatibility with
-# `cmake_minimum_required(VERSION < 3.5)`.  VINS-Fisheye and several ROS pkgs
+# `cmake_minimum_required(VERSION < 3.5)`.  fishloop_vins and several ROS pkgs
 # still declare 2.8.3.  Setting this env var globally tells cmake to apply
 # 3.5-era policies to those legacy projects -- works for both the docker-build
 # `catkin_make` below AND any manual `catkin_make` you run inside the running
@@ -177,7 +177,7 @@ RUN wget -qO - https://apt.kitware.com/keys/kitware-archive-latest.asc \
 ENV CMAKE_POLICY_VERSION_MINIMUM=3.5
 
 # -----------------------------------------------------------------------------
-# 5. libSGM  (CUDA depth estimation backend used by VINS-Fisheye)
+# 5. libSGM  (CUDA depth estimation backend used by fishloop_vins)
 # -----------------------------------------------------------------------------
 RUN cd /opt && git clone https://github.com/fixstars/libSGM.git && \
     cd libSGM && git checkout 3.0.0 && \
@@ -192,26 +192,26 @@ RUN cd /opt && git clone https://github.com/fixstars/libSGM.git && \
 
 # -----------------------------------------------------------------------------
 # 5b. backward-cpp (single-header stack-trace lib used when ENABLE_BACKWARD=ON
-#     in vins_estimator/CMakeLists.txt). VINS-Fisheye source #include's it as
+#     in vins_estimator/CMakeLists.txt). fishloop_vins source #include's it as
 #     <backward.hpp>, so drop it directly into /usr/local/include.
 # -----------------------------------------------------------------------------
 RUN wget -q https://raw.githubusercontent.com/bombela/backward-cpp/master/backward.hpp \
          -O /usr/local/include/backward.hpp
 
 # -----------------------------------------------------------------------------
-# 6. Catkin workspace + VINS-Fisheye source
+# 6. Catkin workspace + fishloop_vins source
 # -----------------------------------------------------------------------------
 ENV CATKIN_WS=/root/catkin_ws
 RUN mkdir -p ${CATKIN_WS}/src
 WORKDIR ${CATKIN_WS}/src
 
-COPY . ${CATKIN_WS}/src/VINS-Fisheye
+COPY . ${CATKIN_WS}/src/fishloop_vins
 
 # vins_nodelet_pkg is referenced in package.xml but not bundled in this repo.
 RUN git clone https://github.com/HKUST-Swarm/vins_nodelet_pkg.git || true
 
 # vision_opencv (cv_bridge) overlay: the apt cv_bridge is hard-linked against
-# Ubuntu's apt OpenCV 4.2 (.so.4.2). When VINS-Fisheye links against our
+# Ubuntu's apt OpenCV 4.2 (.so.4.2). When fishloop_vins links against our
 # /usr/local 4.5.5 build, ld emits "may conflict" warnings and runtime can hit
 # subtle ABI mismatches. Building cv_bridge from source against /usr/local
 # OpenCV makes everything use one copy.
@@ -221,7 +221,7 @@ RUN git clone -b noetic https://github.com/ros-perception/vision_opencv.git && \
     touch vision_opencv/opencv_tests/CATKIN_IGNORE
 
 # -----------------------------------------------------------------------------
-# 7. Patch VINS-Fisheye for OpenCV 4
+# 7. Patch fishloop_vins for OpenCV 4
 #    * Relax `find_package(OpenCV 3.4 ...)` / `find_package(OpenCV 3 ...)`
 #      to `find_package(OpenCV 4 ...)` so it picks up our /usr/local 4.5.5.
 #    * NB: we KEEP the in-tree `SET("OpenCV_DIR" "/usr/local/lib/cmake/opencv4")`
@@ -229,7 +229,7 @@ RUN git clone -b noetic https://github.com/ros-perception/vision_opencv.git && \
 #      cv_bridge's exported includes. The source already sets it to the OpenCV-4
 #      layout (/usr/local/lib/cmake/opencv4), so we no longer comment it out.
 # -----------------------------------------------------------------------------
-RUN cd ${CATKIN_WS}/src/VINS-Fisheye/vins_estimator && \
+RUN cd ${CATKIN_WS}/src/fishloop_vins/fishloop_vins_estimator && \
     sed -i -E 's|find_package\(OpenCV 3(\.4)? REQUIRED|find_package(OpenCV 4 REQUIRED|g' \
         CMakeLists.txt && \
     echo "===== Patched find_package lines =====" && \

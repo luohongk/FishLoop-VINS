@@ -1,5 +1,5 @@
 # =============================================================================
-# Dockerfile for VINS-Fisheye  (CPU-only variant, Noetic base)
+# Dockerfile for fishloop_vins  (CPU-only variant, Noetic base)
 #   - Base : osrf/ros:noetic-desktop-full   (Ubuntu 20.04 + ROS Noetic inside)
 #   - No CUDA, no libSGM, no source-built OpenCV.
 #   - Uses the system OpenCV 4.2 that ships with Ubuntu 20.04 / ROS Noetic.
@@ -24,21 +24,21 @@
 # are not added to any add_executable() / add_library() in CMakeLists.txt).
 #
 # Build:
-#   docker build -t vins-fisheye:cpu -f docker/Dockerfile_CPU .
+#   docker build -t fishloop_vins:cpu -f docker/Dockerfile_CPU .
 #
 # Run:
 #   xhost +local:root
 #   docker run -it --rm --net=host \
 #       --env="DISPLAY" --env="QT_X11_NO_MITSHM=1" \
 #       --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
-#       vins-fisheye:cpu
+#       fishloop_vins:cpu
 # =============================================================================
 
 FROM osrf/ros:noetic-desktop-full
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
-# VINS-Fisheye + a few ROS pkgs declare `cmake_minimum_required(VERSION 2.8.3)`,
+# fishloop_vins + a few ROS pkgs declare `cmake_minimum_required(VERSION 2.8.3)`,
 # which cmake >= 4.0 refuses outright.  Focal apt ships cmake 3.16.3 today,
 # but apply this policy globally so any future cmake upgrade (or manual one)
 # inside the container still works.
@@ -67,14 +67,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # -----------------------------------------------------------------------------
-# 2. Catkin workspace + VINS-Fisheye source
+# 2. Catkin workspace + fishloop_vins source
 # -----------------------------------------------------------------------------
 ENV CATKIN_WS=/root/catkin_ws
 RUN mkdir -p ${CATKIN_WS}/src
 WORKDIR ${CATKIN_WS}/src
 
 # Build context = repo root.  Run with:  docker build ... -f docker/Dockerfile_CPU .
-COPY . ${CATKIN_WS}/src/VINS-Fisheye
+COPY . ${CATKIN_WS}/src/fishloop_vins
 
 # vins_nodelet_pkg is referenced in package.xml but not bundled in this repo.
 RUN git clone https://github.com/HKUST-Swarm/vins_nodelet_pkg.git || true
@@ -82,7 +82,7 @@ RUN git clone https://github.com/HKUST-Swarm/vins_nodelet_pkg.git || true
 # -----------------------------------------------------------------------------
 # 3. Force CPU mode + bump the OpenCV version pin to 4
 # -----------------------------------------------------------------------------
-RUN cd ${CATKIN_WS}/src/VINS-Fisheye/vins_estimator && \
+RUN cd ${CATKIN_WS}/src/fishloop_vins/fishloop_vins_estimator && \
     sed -i 's|^set(DETECT_CUDA true)|set(DETECT_CUDA false)|' CMakeLists.txt && \
     sed -i -E 's|find_package\(OpenCV 3(\.4)? REQUIRED|find_package(OpenCV 4 REQUIRED|g' \
         CMakeLists.txt && \

@@ -1,5 +1,5 @@
 # =============================================================================
-# docker-compose.yml for VINS-Fisheye
+# docker-compose.yml for fishloop_vins
 #
 # Two services, selected by Compose profile:
 #   * cpu  -> docker/Dockerfile_CPU   (Noetic + system OpenCV 4.2)
@@ -36,8 +36,8 @@ services:
   # ---------------------------------------------------------------------------
   cpu:
     profiles: ["cpu"]
-    image: vins-fisheye:cpu
-    container_name: vins-fisheye-cpu
+    image: fishloop_vins:cpu
+    container_name: fishloop_vins-cpu
     build:
       context: .
       dockerfile: docker/Dockerfile_CPU
@@ -54,7 +54,7 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       # Mount the source so edits on the host show up in the container without
       # rebuilding.  Comment out if you prefer the image-baked source only.
-      - ./:/root/catkin_ws/src/VINS-Fisheye:rw
+      - ./:/root/catkin_ws/src/fishloop_vins:rw
       # Place rosbags / datasets here on the host.
       - ./data:/root/data:rw
     working_dir: /root/catkin_ws
@@ -65,8 +65,8 @@ services:
   # ---------------------------------------------------------------------------
   gpu:
     profiles: ["gpu"]
-    image: vins-fisheye:gpu
-    container_name: vins-fisheye-gpu
+    image: fishloop_vins:gpu
+    container_name: fishloop_vins-gpu
     build:
       context: .
       dockerfile: docker/Dockerfile_GPU
@@ -96,7 +96,7 @@ services:
       - ROS_MASTER_URI=http://localhost:11311
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      - ./:/root/catkin_ws/src/VINS-Fisheye:rw
+      - ./:/root/catkin_ws/src/fishloop_vins:rw
       - ./data:/root/data:rw
     working_dir: /root/catkin_ws
     command: bash
