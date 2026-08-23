@@ -76,9 +76,6 @@ WORKDIR ${CATKIN_WS}/src
 # Build context = repo root.  Run with:  docker build ... -f docker/Dockerfile_CPU .
 COPY . ${CATKIN_WS}/src/fishloop_vins
 
-# vins_nodelet_pkg is referenced in package.xml but not bundled in this repo.
-RUN git clone https://github.com/HKUST-Swarm/vins_nodelet_pkg.git || true
-
 # -----------------------------------------------------------------------------
 # 3. Force CPU mode + bump the OpenCV version pin to 4
 # -----------------------------------------------------------------------------

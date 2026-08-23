@@ -728,5 +728,12 @@ FeatureFrame PinholeFeatureTracker<CvMat>::trackImage(double _cur_time, cv::Inpu
     printf("feature track whole time %f PTS %ld\n", t_r.toc(), cur_un_pts.size());
     return featureFrame;
     */
+    (void)_cur_time;
+    (void)_img;
+    (void)_img1;
+    ROS_ERROR_THROTTLE(2.0,
+        "PinholeFeatureTracker::trackImage is not implemented in this fork; "
+        "use is_fisheye: 1");
+    return FeatureFrame();
 }
 };

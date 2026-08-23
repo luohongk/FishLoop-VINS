@@ -3,7 +3,7 @@
 #
 # Two services, selected by Compose profile:
 #   * cpu  -> docker/Dockerfile_CPU   (Noetic + system OpenCV 4.2)
-#   * gpu  -> docker/Dockerfile_GPU   (Noetic + OpenCV 4.5.5 + CUDA 11.6)
+#   * gpu  -> docker/Dockerfile_GPU   (Noetic + OpenCV 4.5.5 + CUDA 11.8)
 #
 # Usage:
 #   # Build only
@@ -19,7 +19,7 @@
 #   docker compose exec gpu bash
 #
 #   # GPU build with a specific arch (RTX 30 = 8.6, RTX 40 = 8.9, etc.)
-#   CUDA_ARCH=8.6 docker compose --profile gpu build
+#   CUDA_ARCH=8.9 CUDA_ARCH_PTX=8.9 docker compose --profile gpu build
 #
 #   # Tear everything down
 #   docker compose --profile gpu down
@@ -71,10 +71,11 @@ services:
       context: .
       dockerfile: docker/Dockerfile_GPU
       args:
-        # Override on host with: CUDA_ARCH=8.6 docker compose --profile gpu build
-        CUDA_ARCH: ${CUDA_ARCH:-7.5}
+        # RTX 40 requires CUDA >= 11.8 for native sm_89 compilation.
+        CUDA_ARCH: ${CUDA_ARCH:-8.9}
+        CUDA_ARCH_PTX: ${CUDA_ARCH_PTX:-8.9}
         OPENCV_VERSION: ${OPENCV_VERSION:-4.5.5}
-        CUDA_VER: ${CUDA_VER:-11-6}
+        CUDA_VER: ${CUDA_VER:-11-8}
     network_mode: host
     ipc: host
     stdin_open: true

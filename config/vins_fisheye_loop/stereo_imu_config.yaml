@@ -73,7 +73,7 @@ body_T_cam1: !!opencv-matrix
 #Multiple thread support
 multiple_thread: 1
 #GPU acceleration
-use_gpu: 0
+use_gpu: 1
 use_vxworks: 0
 
 # Dual-fisheye sub-image flags. Each fisheye camera is unwarped into

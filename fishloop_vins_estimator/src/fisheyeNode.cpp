@@ -24,6 +24,7 @@ void popIfNotEmpty(QueueT &queue)
 static bool cudaPipelineSmokeTest()
 {
 #ifdef USE_CUDA
+    const char *stage = "device discovery";
     try {
         const int device_count = cv::cuda::getCudaEnabledDeviceCount();
         if (device_count <= 0) {
@@ -32,7 +33,17 @@ static bool cudaPipelineSmokeTest()
         }
 
         cv::cuda::setDevice(0);
+        cv::cuda::DeviceInfo device(0);
+        ROS_INFO("[cuda] device=%s compute=%d.%d compatible=%d",
+            device.name(), device.majorVersion(), device.minorVersion(),
+            device.isCompatible() ? 1 : 0);
+        if (!device.isCompatible()) {
+            ROS_WARN("[cuda] OpenCV CUDA binaries do not support compute %d.%d; rebuild the GPU image with the matching CUDA_ARCH.",
+                device.majorVersion(), device.minorVersion());
+            return false;
+        }
 
+        stage = "host test data";
         cv::Mat host(32, 32, CV_8UC1, cv::Scalar(0));
         cv::Mat map_x(host.size(), CV_32FC1);
         cv::Mat map_y(host.size(), CV_32FC1);
@@ -48,16 +59,37 @@ static bool cudaPipelineSmokeTest()
         cv::cuda::GpuMat map_y_gpu;
         cv::cuda::GpuMat remapped;
         cv::cuda::GpuMat pyramid;
+        cv::cuda::GpuMat corners;
 
+        stage = "upload";
         gpu.upload(host);
         map_x_gpu.upload(map_x);
         map_y_gpu.upload(map_y);
+        stage = "remap";
         cv::cuda::remap(gpu, remapped, map_x_gpu, map_y_gpu, cv::INTER_LINEAR);
+        stage = "pyrDown";
         cv::cuda::pyrDown(remapped, pyramid);
+
+        stage = "GFTT";
+        cv::Ptr<cv::cuda::CornersDetector> detector =
+            cv::cuda::createGoodFeaturesToTrackDetector(CV_8UC1, 20, 0.01, 3.0);
+        detector->detect(remapped, corners);
+
+        stage = "PyrLK";
+        std::vector<cv::cuda::GpuMat> test_pyramid{remapped, pyramid};
+        std::vector<cv::Point2f> host_points{cv::Point2f(16.0f, 16.0f)};
+        cv::cuda::GpuMat previous_points(host_points);
+        cv::cuda::GpuMat current_points(host_points);
+        cv::cuda::GpuMat status;
+        cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> optical_flow =
+            cv::cuda::SparsePyrLKOpticalFlow::create(
+                cv::Size(7, 7), 1, 10, true);
+        optical_flow->calc(test_pyramid, test_pyramid, previous_points,
+            current_points, status, cv::noArray());
         cv::cuda::Stream::Null().waitForCompletion();
         return true;
     } catch (const cv::Exception &e) {
-        ROS_WARN_STREAM("[cuda] Smoke test failed: " << e.what());
+        ROS_WARN_STREAM("[cuda] Smoke test failed at " << stage << ": " << e.what());
         return false;
     }
 #else
@@ -365,85 +397,84 @@ void FisheyeFlattenHandler::imgs_callback(double t, const cv::Mat & img1, const 
 }
 
 bool FisheyeFlattenHandler::has_image_in_buffer() {
-    return fisheye_buf_t.size() > 0;
+    std::lock_guard<std::mutex> lock(buf_lock);
+    return !fisheye_buf_t.empty();
 }
 
 double FisheyeFlattenHandler::pop_from_buffer(
             CvCudaImages & up_gray, CvCudaImages & down_gray,
             CvCudaImages & up_color, CvCudaImages & down_color,
             cv::Mat *full_left_undist_gray) {
-    if (USE_GPU) {
-        buf_lock.lock();
-        if (fisheye_buf_t.size() > 0) {
-            auto t = fisheye_buf_t.front();
-            up_gray = fisheye_cuda_buf_up.front();
-            down_gray = fisheye_cuda_buf_down.front();
-            if (full_left_undist_gray && !full_left_undist_gray_buf.empty()) {
-                *full_left_undist_gray = full_left_undist_gray_buf.front();
-            }
-
-            if(is_color) {
-                up_color = fisheye_cuda_buf_up_color.front();
-                down_color = fisheye_cuda_buf_down_color.front();
-            }
-
-
-            fisheye_buf_t.pop();
-            fisheye_cuda_buf_up.pop();
-            fisheye_cuda_buf_down.pop();
-            if (!full_left_undist_gray_buf.empty()) {
-                full_left_undist_gray_buf.pop();
-            }
-
-            if(is_color) {
-                fisheye_cuda_buf_up_color.pop();
-                fisheye_cuda_buf_down_color.pop();
-            }
-
-            buf_lock.unlock();
-            return t;
-        }
+    if (!USE_GPU)
+        return -1;
+    std::lock_guard<std::mutex> lock(buf_lock);
+    if (fisheye_buf_t.empty())
+        return -1;
+    if (fisheye_cuda_buf_up.empty() || fisheye_cuda_buf_down.empty() ||
+        (is_color && (fisheye_cuda_buf_up_color.empty() ||
+                      fisheye_cuda_buf_down_color.empty()))) {
+        ROS_ERROR_THROTTLE(2.0, "[fisheye_buffer] inconsistent CUDA queues");
+        return -1;
     }
-    return -1;
+
+    const double t = fisheye_buf_t.front();
+    up_gray = fisheye_cuda_buf_up.front();
+    down_gray = fisheye_cuda_buf_down.front();
+    if (full_left_undist_gray && !full_left_undist_gray_buf.empty())
+        *full_left_undist_gray = full_left_undist_gray_buf.front();
+    if (is_color) {
+        up_color = fisheye_cuda_buf_up_color.front();
+        down_color = fisheye_cuda_buf_down_color.front();
+    }
+
+    fisheye_buf_t.pop();
+    fisheye_cuda_buf_up.pop();
+    fisheye_cuda_buf_down.pop();
+    if (!full_left_undist_gray_buf.empty())
+        full_left_undist_gray_buf.pop();
+    if (is_color) {
+        fisheye_cuda_buf_up_color.pop();
+        fisheye_cuda_buf_down_color.pop();
+    }
+    return t;
 }
 
 double FisheyeFlattenHandler::pop_from_buffer(
             CvImages & up_gray, CvImages & down_gray,
             CvImages & up_color, CvImages & down_color,
             cv::Mat *full_left_undist_gray) {
-    if(!USE_GPU) {
-        buf_lock.lock();
-        if (fisheye_buf_t.size() > 0) {
-            auto t = fisheye_buf_t.front();
-
-            up_gray = fisheye_buf_up.front();
-            down_gray = fisheye_buf_down.front();
-            if (full_left_undist_gray && !full_left_undist_gray_buf.empty()) {
-                *full_left_undist_gray = full_left_undist_gray_buf.front();
-            }
-
-            if(is_color) {
-                up_color = fisheye_buf_up_color.front();
-                down_color = fisheye_buf_down_color.front();
-            }
-
-            fisheye_buf_t.pop();
-            fisheye_buf_up.pop();
-            fisheye_buf_down.pop();
-            if (!full_left_undist_gray_buf.empty()) {
-                full_left_undist_gray_buf.pop();
-            }
-
-            if(is_color) {
-                fisheye_buf_up_color.pop();
-                fisheye_buf_down_color.pop();
-            }
-            
-            buf_lock.unlock();
-            return t;
-        }
+    if (USE_GPU)
+        return -1;
+    std::lock_guard<std::mutex> lock(buf_lock);
+    if (fisheye_buf_t.empty())
+        return -1;
+    if (fisheye_buf_up.empty() || fisheye_buf_down.empty() ||
+        (is_color && (fisheye_buf_up_color.empty() ||
+                      fisheye_buf_down_color.empty()))) {
+        ROS_ERROR_THROTTLE(2.0, "[fisheye_buffer] inconsistent CPU queues");
+        return -1;
     }
-    return -1;
+
+    const double t = fisheye_buf_t.front();
+    up_gray = fisheye_buf_up.front();
+    down_gray = fisheye_buf_down.front();
+    if (full_left_undist_gray && !full_left_undist_gray_buf.empty())
+        *full_left_undist_gray = full_left_undist_gray_buf.front();
+    if (is_color) {
+        up_color = fisheye_buf_up_color.front();
+        down_color = fisheye_buf_down_color.front();
+    }
+
+    fisheye_buf_t.pop();
+    fisheye_buf_up.pop();
+    fisheye_buf_down.pop();
+    if (!full_left_undist_gray_buf.empty())
+        full_left_undist_gray_buf.pop();
+    if (is_color) {
+        fisheye_buf_up_color.pop();
+        fisheye_buf_down_color.pop();
+    }
+    return t;
 }
 
 void FisheyeFlattenHandler::setup_extrinsic(fishloop_vins::FlattenImages & images, const Estimator & estimator) {
@@ -788,7 +819,8 @@ void VinsNodeBaseClass::Init(ros::NodeHandle & n)
     //We use blank images to initialize cuda before every thing
     if (USE_GPU) {
         TicToc blank;
-        cv::Mat mat(fisheye_handler->raw_height(), fisheye_handler->raw_width(), CV_8UC3);
+        cv::Mat mat(fisheye_handler->raw_height(), fisheye_handler->raw_width(),
+            CV_8UC3, cv::Scalar::all(0));
         fisheye_handler->imgs_callback(0, mat, mat, true);
             estimator.inputFisheyeImage(0, 
             fisheye_handler->fisheye_up_imgs_cuda_gray, fisheye_handler->fisheye_down_imgs_cuda_gray, true);

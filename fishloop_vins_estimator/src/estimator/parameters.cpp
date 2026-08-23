@@ -114,7 +114,7 @@ void readParameters(std::string config_file)
     cv::FileStorage fsSettings;
     try {
         fsSettings.open(config_file.c_str(), cv::FileStorage::READ);
-    } catch(cv::Exception ex) {
+    } catch(const cv::Exception &ex) {
         std::cerr << "ERROR:" << ex.what() << " Can't open config file" << std::endl;
     }
     if(!fsSettings.isOpened())

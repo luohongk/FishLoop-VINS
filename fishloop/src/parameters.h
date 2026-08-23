@@ -65,6 +65,7 @@ extern int LOOP_RETRIEVAL_CAMERA_COUNT;   // cameras used by DBoW retrieval
 extern int LOOP_RETRIEVAL_VIEW_COUNT;     // perspective views used per camera
 extern int LOOP_RETRIEVAL_USE_VIO_FEATURES; // use window/VIO BRIEF for DBoW
 extern int LOOP_ORB_GEOMETRY;              // use rotation-invariant ORB for PnP matching
+extern int LOOP_USE_GPU;                   // use CUDA for supported loop-closure stages
 extern int LOOP_ORB_FEATURES;              // dense ORB features retained in each old frame
 extern int LOOP_ORB_FAST_TH;               // ORB FAST threshold
 extern int LOOP_ORB_DIST_TH;               // max ORB Hamming distance

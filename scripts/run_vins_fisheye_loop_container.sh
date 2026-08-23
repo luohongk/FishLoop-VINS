@@ -124,5 +124,5 @@ fi
 echo "Rosbag finished; waiting ${DRAIN_SECONDS}s for estimator/pose-graph queues to drain"
 sleep "${DRAIN_SECONDS}"
 echo "Finished. Trajectories:"
-ls -lh /root/catkin_ws/src/VINS-Fisheye/data/vio.csv \
-       /root/catkin_ws/src/VINS-Fisheye/data/vio_loop.csv
+ls -lh /root/catkin_ws/src/fishloop_vins/data/vio.csv \
+       /root/catkin_ws/src/fishloop_vins/data/vio_loop.csv

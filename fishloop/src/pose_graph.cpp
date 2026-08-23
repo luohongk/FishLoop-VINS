@@ -470,6 +470,7 @@ vector<int> PoseGraph::detectLoop(KeyFrame* keyframe, int frame_index)
 
 vector<int> PoseGraph::detectLoopMultiView(KeyFrame* keyframe, int frame_index)
 {
+	TicToc query_timer;
 	struct CandidateScore
 	{
 		int frame_id = -1;
@@ -512,6 +513,7 @@ vector<int> PoseGraph::detectLoopMultiView(KeyFrame* keyframe, int frame_index)
 			}
 		}
 	}
+	const double query_ms = query_timer.toc();
 
 	map<int, CandidateScore> aggregate;
 	for (const auto &entry : query_frame_best)
@@ -595,13 +597,16 @@ vector<int> PoseGraph::detectLoopMultiView(KeyFrame* keyframe, int frame_index)
 	for (int i = 0; i < show_count; ++i)
 		top << " " << ranked[i].frame_id << ":" << ranked[i].best_score
 			<< "/v" << ranked[i].view_votes << "/t" << ranked[i].temporal_hits;
+	TicToc add_timer;
+	addKeyFrameIntoVoc(keyframe);
+	const double add_ms = add_timer.toc();
 	ROS_INFO_THROTTLE(2.0,
-		"[loop_fusion][multiview-dbow] frame=%d query_views=%zu db_views=%zu top=%s candidates=%zu best_ok=%d temporal=%d/%d window=%d forced=%d",
+		"[loop_fusion][multiview-dbow] frame=%d query_views=%zu db_views=%zu top=%s candidates=%zu best_ok=%d temporal=%d/%d window=%d forced=%d query=%.2fms add=%.2fms",
 		frame_index, query_views.size(), db_entry_frames.size(), top.str().c_str(),
 		loop_candidates.size(), best_score_ok ? 1 : 0, LOOP_TEMPORAL_VOTE_MIN_HITS,
-		LOOP_TEMPORAL_VOTE_FRAMES, LOOP_TEMPORAL_CANDIDATE_WINDOW, forced_early);
+		LOOP_TEMPORAL_VOTE_FRAMES, LOOP_TEMPORAL_CANDIDATE_WINDOW, forced_early,
+		query_ms, add_ms);
 
-	addKeyFrameIntoVoc(keyframe);
 	return loop_candidates;
 }
 

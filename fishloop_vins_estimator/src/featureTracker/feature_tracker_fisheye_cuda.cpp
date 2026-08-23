@@ -21,23 +21,40 @@ void FisheyeFeatureTrackerCuda::drawTrackFisheye(const cv::Mat & img_up,
 }
 
 cv::cuda::GpuMat concat_side(const std::vector<cv::cuda::GpuMat> & arr) {
-    int cols = arr[1].cols;
-    int rows = arr[1].rows;
-    if (enable_rear_side) {
-        cv::cuda::GpuMat NewImg(rows, cols*4, arr[1].type()); 
-        for (int i = 1; i < 5; i ++) {
-            if (!arr[i].empty())
-                arr[i].copyTo(NewImg(cv::Rect(cols * (i-1), 0, cols, rows)));
-        }
-        return NewImg;
-    } else {
-        cv::cuda::GpuMat NewImg(rows, cols*3, arr[1].type()); 
-        for (int i = 1; i < 4; i ++) {
-            if (!arr[i].empty())
-                arr[i].copyTo(NewImg(cv::Rect(cols * (i-1), 0, cols, rows)));
-        }
-        return NewImg;
+    const int end = enable_rear_side ? 5 : 4;
+    if (arr.size() < static_cast<size_t>(end)) {
+        ROS_ERROR_THROTTLE(2.0,
+            "[fisheye_cuda] expected at least %d sub-images, got %zu",
+            end, arr.size());
+        return cv::cuda::GpuMat();
     }
+
+    int reference_index = -1;
+    for (int i = 1; i < end; ++i) {
+        if (!arr[i].empty()) {
+            reference_index = i;
+            break;
+        }
+    }
+    if (reference_index < 0)
+        return cv::cuda::GpuMat();
+
+    const int cols = arr[reference_index].cols;
+    const int rows = arr[reference_index].rows;
+    const int type = arr[reference_index].type();
+    cv::cuda::GpuMat new_img(rows, cols * (end - 1), type);
+    new_img.setTo(cv::Scalar::all(0));
+    for (int i = 1; i < end; ++i) {
+        if (arr[i].empty())
+            continue;
+        if (arr[i].size() != cv::Size(cols, rows) || arr[i].type() != type) {
+            ROS_ERROR_THROTTLE(2.0,
+                "[fisheye_cuda] inconsistent side image at index %d", i);
+            continue;
+        }
+        arr[i].copyTo(new_img(cv::Rect(cols * (i - 1), 0, cols, rows)));
+    }
+    return new_img;
 }
 
 
@@ -67,6 +84,12 @@ FeatureFrame FisheyeFeatureTrackerCuda::trackImage(double _cur_time,
     CvCudaImages fisheye_imgs_up, fisheye_imgs_down;
     img1.getGpuMatVector(fisheye_imgs_up);
     img2.getGpuMatVector(fisheye_imgs_down);
+    if (fisheye_imgs_up.empty() || fisheye_imgs_down.empty()) {
+        ROS_ERROR_THROTTLE(2.0,
+            "[fisheye_cuda] empty flattened image vector up=%zu down=%zu",
+            fisheye_imgs_up.size(), fisheye_imgs_down.size());
+        return FeatureFrame();
+    }
     TicToc t_r;
     cv::cuda::GpuMat up_side_img;
     cv::cuda::GpuMat down_side_img;
@@ -113,17 +136,17 @@ FeatureFrame FisheyeFeatureTrackerCuda::trackImage(double _cur_time,
     }
 
     set_predict_lock.lock();
-    if (enable_up_top) {
+    if (enable_up_top && !up_top_img.empty()) {
         // ROS_INFO("Tracking top");
         cur_up_top_pts = opticalflow_track(up_top_img, prev_up_top_pyr, prev_up_top_pts, 
             ids_up_top, track_up_top_cnt, removed_pts, false, predict_up_top);
     }
-    if (enable_up_side) {
+    if (enable_up_side && !up_side_img.empty()) {
         cur_up_side_pts = opticalflow_track(up_side_img, prev_up_side_pyr, prev_up_side_pts, 
             ids_up_side, track_up_side_cnt, removed_pts, false, predict_up_side);
     }
 
-    if (enable_down_top) {
+    if (enable_down_top && !down_top_img.empty()) {
         cur_down_top_pts = opticalflow_track(down_top_img, prev_down_top_pyr, prev_down_top_pts, 
             ids_down_top, track_down_top_cnt, removed_pts, false, predict_down_top);
     }
@@ -137,14 +160,14 @@ FeatureFrame FisheyeFeatureTrackerCuda::trackImage(double _cur_time,
     }
     
     TicToc t_d;
-    if (enable_up_top) {
+    if (enable_up_top && !up_top_img.empty()) {
         detectPoints(up_top_img, n_pts_up_top, cur_up_top_pts, TOP_PTS_CNT);
     }
-    if (enable_down_top) {
+    if (enable_down_top && !down_top_img.empty()) {
         detectPoints(down_top_img, n_pts_down_top, cur_down_top_pts, TOP_PTS_CNT);
     }
 
-    if (enable_up_side) {
+    if (enable_up_side && !up_side_img.empty()) {
         detectPoints(up_side_img, n_pts_up_side, cur_up_side_pts, SIDE_PTS_CNT);
     }
 
@@ -157,7 +180,7 @@ FeatureFrame FisheyeFeatureTrackerCuda::trackImage(double _cur_time,
     addPointsFisheye();
 
     TicToc tic2;
-    if (enable_down_side) {
+    if (enable_down_side && !down_side_img.empty()) {
         ids_down_side = ids_up_side;
         std::vector<cv::Point2f> down_side_init_pts = cur_up_side_pts;
         cur_down_side_pts = opticalflow_track(down_side_img, prev_up_side_pyr, down_side_init_pts, ids_down_side, 
@@ -219,7 +242,7 @@ FeatureFrame FisheyeFeatureTrackerCuda::trackImage(double _cur_time,
     prev_up_top_un_pts_map = cur_up_top_un_pts_map;
     prev_down_top_un_pts_map = cur_down_top_un_pts_map;
     prev_up_side_un_pts_map = cur_up_side_un_pts_map;
-    prev_down_side_un_pts_map = cur_up_side_un_pts_map;
+    prev_down_side_un_pts_map = cur_down_side_un_pts_map;
     prev_time = cur_time;
 
     up_top_prevLeftPtsMap = pts_map(ids_up_top, cur_up_top_pts);

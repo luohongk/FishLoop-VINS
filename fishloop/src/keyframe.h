@@ -60,6 +60,7 @@ struct OrbMatchStats
 	int geometric_pass = 0;
 	int mutual_unique_pass = 0;
 	double mean_best_distance = 0.0;
+	bool gpu_used = false;
 };
 
 struct LoopFeature

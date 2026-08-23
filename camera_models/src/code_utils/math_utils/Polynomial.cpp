@@ -89,6 +89,7 @@ Polynomial::getOneRealRoot( double _y, double x_min, double x_max )
     //    return realRoot(0);
     // else
     //    return 0;
+    return 0;
 }
 
 eigen_utils::Vector

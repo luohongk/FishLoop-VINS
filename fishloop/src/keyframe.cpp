@@ -15,6 +15,80 @@
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <opencv2/opencv_modules.hpp>
+
+#ifdef HAVE_OPENCV_CUDAFEATURES2D
+#include <opencv2/core/cuda.hpp>
+#include <opencv2/cudafeatures2d.hpp>
+#endif
+
+namespace {
+
+bool cudaOrbMatcherAvailable()
+{
+#ifdef HAVE_OPENCV_CUDAFEATURES2D
+	if (!LOOP_USE_GPU)
+		return false;
+	static const bool available = []()
+	{
+		try
+		{
+			if (cv::cuda::getCudaEnabledDeviceCount() <= 0)
+				return false;
+			cv::cuda::DeviceInfo device;
+			if (!device.isCompatible())
+			{
+				ROS_WARN("[loop_fusion][CUDA] device %s compute=%d.%d is not "
+					"supported by this OpenCV CUDA build; using CPU matcher",
+					device.name(), device.majorVersion(), device.minorVersion());
+				return false;
+			}
+			return true;
+		}
+		catch (const cv::Exception &error)
+		{
+			ROS_WARN("[loop_fusion][CUDA] availability check failed; using CPU "
+				"matcher: %s", error.what());
+			return false;
+		}
+	}();
+	return available;
+#else
+	return false;
+#endif
+}
+
+bool cudaOrbKnnMatch(const cv::Mat &query_descriptors,
+	const cv::Mat &train_descriptors,
+	std::vector<std::vector<cv::DMatch>> &forward_matches,
+	std::vector<std::vector<cv::DMatch>> &reverse_matches)
+{
+#ifdef HAVE_OPENCV_CUDAFEATURES2D
+	if (!cudaOrbMatcherAvailable())
+		return false;
+	try
+	{
+		cv::cuda::GpuMat query_gpu;
+		cv::cuda::GpuMat train_gpu;
+		query_gpu.upload(query_descriptors);
+		train_gpu.upload(train_descriptors);
+		static thread_local cv::Ptr<cv::cuda::DescriptorMatcher> matcher =
+			cv::cuda::DescriptorMatcher::createBFMatcher(cv::NORM_HAMMING);
+		matcher->knnMatch(query_gpu, train_gpu, forward_matches, 2);
+		matcher->knnMatch(train_gpu, query_gpu, reverse_matches, 1);
+		return true;
+	}
+	catch (const cv::Exception &error)
+	{
+		ROS_WARN_THROTTLE(5.0,
+			"[loop_fusion][CUDA] ORB matcher failed; falling back to CPU: %s",
+			error.what());
+	}
+#endif
+	return false;
+}
+
+} // namespace
 
 template <typename Derived>
 static void reduceVector(vector<Derived> &v, const vector<uchar> &status)
@@ -260,11 +334,31 @@ KeyFrame::KeyFrame(double _time_stamp, int _index, Vector3d &_vio_T_w_i, Matrix3
 	has_fast_point = false;
 	loop_info << 0, 0, 0, 0, 0, 0, 0, 0;
 	sequence = _sequence;
+	TicToc build_stage_timer;
 	buildCanonicalViews();
+	const double canonical_ms = build_stage_timer.toc();
+	build_stage_timer.tic();
 	computeWindowBRIEFPoint();
+	const double window_brief_ms = build_stage_timer.toc();
+	build_stage_timer.tic();
 	computeBRIEFPoint();
+	const double raw_brief_ms = build_stage_timer.toc();
+	build_stage_timer.tic();
 	computeRetrievalBRIEFPoint();
+	const double retrieval_brief_ms = build_stage_timer.toc();
+	build_stage_timer.tic();
 	computeORBPoint();
+	const double orb_ms = build_stage_timer.toc();
+	if (index % 20 == 0)
+	{
+		ROS_INFO("[loop_fusion][perf-build] frame=%d canonical=%.2fms "
+			"window_brief=%.2fms raw_brief=%.2fms retrieval_brief=%.2fms "
+			"orb=%.2fms total=%.2fms",
+			index, canonical_ms, window_brief_ms, raw_brief_ms,
+			retrieval_brief_ms, orb_ms,
+			canonical_ms + window_brief_ms + raw_brief_ms +
+				retrieval_brief_ms + orb_ms);
+	}
 	if (index % 50 == 0)
 	{
 		vector<cv::Point2f> self_matched_uv;
@@ -716,6 +810,7 @@ void KeyFrame::computeORBPoint()
 	if (!LOOP_ORB_GEOMETRY || image.empty())
 		return;
 
+	TicToc orb_stage_timer;
 	cv::Ptr<cv::ORB> orb = cv::ORB::create(
 		LOOP_ORB_FEATURES, 1.2f, 8, 26, 0, 2, cv::ORB::HARRIS_SCORE, 31,
 		LOOP_ORB_FAST_TH);
@@ -757,6 +852,8 @@ void KeyFrame::computeORBPoint()
 			window_orb_descriptors.push_back(descriptors.row(i));
 		}
 	}
+	const double exact_orb_ms = orb_stage_timer.toc();
+	orb_stage_timer.tic();
 
 	// Old-frame side: distribute a bounded dense ORB budget over all canonical
 	// camera/view images. Each descriptor stores its exact raw EUCM pixel and
@@ -874,6 +971,14 @@ void KeyFrame::computeORBPoint()
 				orb_descriptors.push_back(detected_descriptors.row(row));
 			}
 		}
+	}
+	const double dense_orb_ms = orb_stage_timer.toc();
+	if (index % 20 == 0)
+	{
+		ROS_INFO("[loop_fusion][perf-orb] frame=%d exact=%.2fms dense=%.2fms "
+			"exact_desc=%d dense_desc=%d",
+			index, exact_orb_ms, dense_orb_ms,
+			window_orb_descriptors.rows, orb_descriptors.rows);
 	}
 
 	if (index % 50 == 0)
@@ -1072,11 +1177,16 @@ OrbMatchStats KeyFrame::searchByORBDes(std::vector<cv::Point2f> &matched_2d_old,
 
 	cv::Mat query_descriptors = current_descriptors.rowRange(0, stats.query_count);
 	cv::Mat train_descriptors = old_descriptors.rowRange(0, stats.train_count);
-	cv::BFMatcher matcher(cv::NORM_HAMMING, false);
 	std::vector<std::vector<cv::DMatch>> forward_matches;
 	std::vector<std::vector<cv::DMatch>> reverse_matches;
-	matcher.knnMatch(query_descriptors, train_descriptors, forward_matches, 2);
-	matcher.knnMatch(train_descriptors, query_descriptors, reverse_matches, 1);
+	stats.gpu_used = cudaOrbKnnMatch(query_descriptors, train_descriptors,
+		forward_matches, reverse_matches);
+	if (!stats.gpu_used)
+	{
+		cv::BFMatcher matcher(cv::NORM_HAMMING, false);
+		matcher.knnMatch(query_descriptors, train_descriptors, forward_matches, 2);
+		matcher.knnMatch(train_descriptors, query_descriptors, reverse_matches, 1);
+	}
 
 	double best_distance_sum = 0.0;
 	int best_distance_count = 0;
@@ -1388,13 +1498,16 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 				matched_2d_old, matched_2d_old_norm, status, matched_camera_old,
 				matched_feature_old, old_kf, use_exact_dense_old,
 				orb_distance_threshold, orb_ratio_threshold);
+		const double descriptor_match_ms = t_match.toc();
 		ROS_INFO("[loop_fusion][ORB] cur=%d old=%d query=%d train=%d dist=%d ratio=%d "
 			"mutual_unique=%d mean_best=%.1f source=%s "
-			"dist_th=%d ratio_th=%.2f",
+			"dist_th=%d ratio_th=%.2f backend=%s match=%.2fms",
 			index, old_kf->index, orb_stats.query_count, orb_stats.train_count,
 			orb_stats.distance_pass, orb_stats.ratio_pass,
 			orb_stats.mutual_unique_pass, orb_stats.mean_best_distance,
-			orb_source, orb_distance_threshold, orb_ratio_threshold);
+			orb_source, orb_distance_threshold, orb_ratio_threshold,
+			orb_stats.gpu_used ? "CUDA" : "CPU",
+			descriptor_match_ms);
 	}
 	else
 	{
@@ -1422,13 +1535,15 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 				matched_2d_old, matched_2d_old_norm, status, matched_camera_old,
 				matched_feature_old, old_descriptors, old_keypoints, old_keypoints_norm,
 				old_camera_ids, old_feature_indices);
+		const double descriptor_match_ms = t_match.toc();
 		ROS_INFO("[loop_fusion][BRIEF] cur=%d old=%d query=%d train=%d dist=%d ratio=%d "
-			"ratio_unique=%d mutual_unique=%d mean_best=%.1f source=%s dist_th=%d ratio_th=%.2f",
+			"ratio_unique=%d mutual_unique=%d mean_best=%.1f source=%s dist_th=%d ratio_th=%.2f "
+			"match=%.2fms",
 			index, old_kf->index, brief_stats.query_count, brief_stats.train_count,
 			brief_stats.distance_pass, brief_stats.ratio_pass,
 			brief_stats.unique_train_after_ratio, brief_stats.mutual_unique_pass,
 			brief_stats.mean_best_distance, use_old_window ? "VIO-window" : "stored-fallback",
-			LOOP_BRIEF_DIST_TH, LOOP_BRIEF_RATIO_TH);
+			LOOP_BRIEF_DIST_TH, LOOP_BRIEF_RATIO_TH, descriptor_match_ms);
 	}
 	reduceVector(matched_2d_cur, status);
 	reduceVector(matched_2d_old, status);

@@ -79,6 +79,7 @@ int LOOP_RETRIEVAL_CAMERA_COUNT = 1;
 int LOOP_RETRIEVAL_VIEW_COUNT = 1;
 int LOOP_RETRIEVAL_USE_VIO_FEATURES = 1;
 int LOOP_ORB_GEOMETRY = 1;
+int LOOP_USE_GPU = 0;
 int LOOP_ORB_FEATURES = 2500;
 int LOOP_ORB_FAST_TH = 12;
 int LOOP_ORB_DIST_TH = 64;
@@ -592,6 +593,8 @@ int main(int argc, char **argv)
         LOOP_RETRIEVAL_USE_VIO_FEATURES = (int)fsSettings["loop_retrieval_use_vio_features"];
     if (!fsSettings["loop_orb_geometry"].empty())
         LOOP_ORB_GEOMETRY = (int)fsSettings["loop_orb_geometry"];
+    if (!fsSettings["loop_use_gpu"].empty())
+        LOOP_USE_GPU = (int)fsSettings["loop_use_gpu"];
     if (!fsSettings["loop_orb_features"].empty())
         LOOP_ORB_FEATURES = std::max(100, (int)fsSettings["loop_orb_features"]);
     if (!fsSettings["loop_orb_fast_threshold"].empty())
@@ -781,7 +784,7 @@ int main(int argc, char **argv)
     printf("[loop_fusion] min_inliers=%d fast_th=%d brief_dist_th=%d brief_ratio=%.2f "
            "dbow_top=%d query_gap=%d min_idx=%d skip_first=%d "
            "dbow_best=%.3f dbow_candidate=%.3f max_yaw=%.1f max_t=%.1f "
-           "orb=%d orb_features=%d orb_fast=%d orb_dist=%d orb_ratio=%.2f "
+	           "orb=%d gpu=%d orb_features=%d orb_fast=%d orb_dist=%d orb_ratio=%.2f "
            "exact_dense=%d/%.2f/%d "
            "dense_dist=%d dense_ratio=%.2f dense_geom=%d dense_pnp=%d dense_h=%.1f dense_yaw=%.1f "
            "orb_radius=%.1f "
@@ -793,7 +796,7 @@ int main(int argc, char **argv)
            LOOP_SKIP_FIRST_KEYFRAMES,
            LOOP_DBOW_MIN_NEIGHBOR_SCORE, LOOP_DBOW_MIN_CANDIDATE_SCORE,
            LOOP_MAX_YAW_DEG, LOOP_MAX_TRANSLATION,
-           LOOP_ORB_GEOMETRY, LOOP_ORB_FEATURES, LOOP_ORB_FAST_TH,
+           LOOP_ORB_GEOMETRY, LOOP_USE_GPU, LOOP_ORB_FEATURES, LOOP_ORB_FAST_TH,
            LOOP_ORB_DIST_TH, LOOP_ORB_RATIO_TH,
            LOOP_ORB_EXACT_DENSE_DIST_TH, LOOP_ORB_EXACT_DENSE_RATIO_TH,
            LOOP_ORB_EXACT_DENSE_MIN_INLIERS,

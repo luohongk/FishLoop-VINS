@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Kalibr cam1/cam2 are exposed to VINS as the standardized cam0/cam1 topics.
+# Keep the generated logical topics aligned with vins_fisheye_loop.launch;
+# launch-time remapping connects them to the physical bag topics.
 
 set -euo pipefail
 
@@ -11,12 +12,12 @@ python3 "${SCRIPT_DIR}/kalibr_to_vins.py" \
     --kalibr-dir "${REPO_ROOT}/my_kalibr_result" \
     --out-dir "${CONFIG_DIR}" \
     --cam-pair 1,2 \
-    --topic-map 1:/cam0/image,2:/cam1/image \
+    --topic-map 1:/cam1/image,2:/cam2/image \
     --imu-topic /imu/data_raw \
     --compressed \
-    --use-gpu "${USE_GPU:-0}" \
+    --use-gpu "${USE_GPU:-1}" \
     --imu-noise-scale "${IMU_NOISE_SCALE:-5.0}" \
-    --output-path /root/catkin_ws/src/VINS-Fisheye/data \
+    --output-path /root/catkin_ws/src/fishloop_vins/data \
     --estimate-td 0 \
     --fisheye-fov "${FISHEYE_FOV:-250}" \
     --enable-sides 0 \

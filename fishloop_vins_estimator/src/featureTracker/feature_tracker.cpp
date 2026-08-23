@@ -13,8 +13,42 @@
 #include "../estimator/estimator.h"
 #include "fisheye_undist.hpp"
 
+#include <map>
+#include <tuple>
+
 
 namespace FeatureTracker {
+
+#ifdef USE_CUDA
+namespace {
+
+cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> cudaSparsePyrLK()
+{
+    // Creating the CUDA optical-flow object allocates internal state.  The
+    // tracker calls this path several times per image (top/side/stereo), so
+    // keep one instance per calling thread instead of rebuilding it each time.
+    static thread_local cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> tracker =
+        cv::cuda::SparsePyrLKOpticalFlow::create(cv::Size(21, 21), 3, 30, true);
+    return tracker;
+}
+
+cv::Ptr<cv::cuda::CornersDetector> cudaCornersDetector(int image_type,
+    int max_corners)
+{
+    const auto key = std::make_tuple(image_type, max_corners, MIN_DIST);
+    static thread_local std::map<std::tuple<int, int, int>,
+        cv::Ptr<cv::cuda::CornersDetector>> detectors;
+    auto it = detectors.find(key);
+    if (it == detectors.end()) {
+        it = detectors.emplace(key,
+            cv::cuda::createGoodFeaturesToTrackDetector(
+                image_type, max_corners, 0.01, MIN_DIST)).first;
+    }
+    return it->second;
+}
+
+} // namespace
+#endif
 
 
 void reduceVector(vector<cv::Point2f> &v, vector<uchar> status)
@@ -450,19 +484,14 @@ vector<cv::Point2f> opticalflow_track(cv::cuda::GpuMat & cur_img,
     cv::cuda::GpuMat prev_gpu_pts(prev_pts);
     cv::cuda::GpuMat cur_gpu_pts(cur_pts);
     cv::cuda::GpuMat gpu_status;
-    cv::cuda::GpuMat gpu_err;
-    vector<float> err;
     status.clear();
 
-    //Assume No Prediction Need to add later
-    cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> d_pyrLK_sparse = cv::cuda::SparsePyrLKOpticalFlow::create(
-        cv::Size(21, 21), 3, 30, true);
+    cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> d_pyrLK_sparse = cudaSparsePyrLK();
 
-    d_pyrLK_sparse->calc(prev_pyr, cur_pyr, prev_gpu_pts, cur_gpu_pts, gpu_status, gpu_err);
+    d_pyrLK_sparse->calc(prev_pyr, cur_pyr, prev_gpu_pts, cur_gpu_pts,
+        gpu_status, cv::noArray());
     
     cur_gpu_pts.download(cur_pts);
-    gpu_err.download(err);
-
     gpu_status.download(status);
 
     if(FLOW_BACK)
@@ -470,8 +499,6 @@ vector<cv::Point2f> opticalflow_track(cv::cuda::GpuMat & cur_img,
         // ROS_INFO("Is flow back");
         cv::cuda::GpuMat reverse_gpu_status;
         cv::cuda::GpuMat reverse_gpu_pts = prev_gpu_pts;
-        cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> d_pyrLK_sparse = cv::cuda::SparsePyrLKOpticalFlow::create(
-            cv::Size(21, 21), 3, 30, true);
         d_pyrLK_sparse->calc(cur_pyr, prev_pyr, cur_gpu_pts, reverse_gpu_pts, reverse_gpu_status);
 
         vector<cv::Point2f> reverse_pts(reverse_gpu_pts.cols);
@@ -543,8 +570,8 @@ void detectPoints(const cv::cuda::GpuMat & img, vector<cv::Point2f> & n_pts,
     if (lack_up_top_pts > require_pts/4) {
 
         // ROS_INFO("Lack %d pts; Require %d will detect %d", lack_up_top_pts, require_pts, lack_up_top_pts > require_pts/4);
-        cv::Ptr<cv::cuda::CornersDetector> detector = cv::cuda::createGoodFeaturesToTrackDetector(
-            img.type(), lack_up_top_pts, 0.01, MIN_DIST);
+        cv::Ptr<cv::cuda::CornersDetector> detector =
+            cudaCornersDetector(img.type(), lack_up_top_pts);
         cv::cuda::GpuMat d_prevPts;
         detector->detect(img, d_prevPts);
 
@@ -553,7 +580,7 @@ void detectPoints(const cv::cuda::GpuMat & img, vector<cv::Point2f> & n_pts,
 
         // std::cout << "d_prevPts size: "<< d_prevPts.size()<<std::endl;
         if(!d_prevPts.empty()) {
-            n_pts_tmp = cv::Mat_<cv::Point2f>(cv::Mat(d_prevPts));
+            d_prevPts.download(n_pts_tmp);
         }
         else {
             n_pts_tmp.clear();

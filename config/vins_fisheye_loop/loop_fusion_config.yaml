@@ -137,6 +137,9 @@ loop_brief_ratio_threshold: 0.80
 # 使用旋转不变 ORB 做几何匹配：每个 VIO 点按 bearing 精确投影到其规范
 # 视图像素，并在该位置计算带方向 ORB，描述子始终直接绑定原 3D 点。
 loop_orb_geometry: 1
+# 在 OpenCV CUDA cudafeatures2d 可用时，将 ORB 双向 Hamming KNN 匹配放到 GPU；
+# 无 CUDA 模块、无设备或运行异常时自动回退 CPU BFMatcher。
+loop_use_gpu: 1
 loop_orb_features: 2500
 loop_orb_fast_threshold: 12
 loop_orb_dist_threshold: 64

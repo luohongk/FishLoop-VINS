@@ -3,6 +3,7 @@
 #include <geometry_msgs/PoseStamped.h>
 #include "../utility/tic_toc.h"
 #include "../featureTracker/fisheye_undist.hpp"
+#include <cstring>
 
 using namespace Eigen;
 
@@ -154,8 +155,6 @@ void DepthCamManager::init_with_extrinsic(Eigen::Matrix3d _ric1, Eigen::Vector3d
 
 DepthEstimator * DepthCamManager::create_depth_estimator(int direction, Eigen::Matrix3d r01, Eigen::Vector3d t01) {
     // ROS_INFO("Creating %d depth generator...", direction);
-    DepthEstimator * dep_est;
-    
     std::string _output_path;
     if (direction == 0) {
         _output_path = OUTPUT_FOLDER + "/left_dep.yaml";
@@ -452,7 +451,9 @@ void DepthCamManager::add_pts_point_cloud(const cv::Mat & pts3d, Eigen::Matrix3d
                         rgb_packed = (bgr << 16) | (bgr << 8) | bgr;
                     }
 
-                    pcl.channels[0].values.push_back(*(float*)(&rgb_packed));
+                    float rgb_value;
+                    std::memcpy(&rgb_value, &rgb_packed, sizeof(rgb_value));
+                    pcl.channels[0].values.push_back(rgb_value);
                     pcl.channels[1].values.push_back(u);
                     pcl.channels[2].values.push_back(v);
                 }
@@ -499,7 +500,9 @@ void DepthCamManager::publish_world_point_cloud(const cv::Mat & pts3d, Eigen::Ma
                 if (!color.empty()) {
                     const cv::Vec3b& bgr = color.at<cv::Vec3b>(v, u);
                     int32_t rgb_packed = (bgr[2] << 16) | (bgr[1] << 8) | bgr[0];
-                    point_cloud.channels[0].values.push_back(*(float*)(&rgb_packed));
+                    float rgb_value;
+                    std::memcpy(&rgb_value, &rgb_packed, sizeof(rgb_value));
+                    point_cloud.channels[0].values.push_back(rgb_value);
 
                     point_cloud.channels[1].values.push_back(u);
                     point_cloud.channels[2].values.push_back(v);

@@ -1,7 +1,7 @@
 # =============================================================================
 # Dockerfile for fishloop_vins  (GPU / CUDA variant, Noetic base)
 #   - Base : osrf/ros:noetic-desktop-full   (Ubuntu 20.04 + ROS Noetic)
-#   - CUDA : 11.6 dev  (minimal subset, ~700 MB)
+#   - CUDA : 11.8 dev  (minimal subset, ~700 MB)
 #   - OpenCV : 4.5.5 from source, WITH_CUDA=ON, slim BUILD_LIST (no contrib)
 #   - libSGM : 3.0.0
 #
@@ -28,16 +28,19 @@
 #
 # Build:
 #   docker build -t fishloop_vins:gpu \
-#       --build-arg CUDA_ARCH=7.5 \
+#       --build-arg CUDA_ARCH=8.9 \
+#       --build-arg CUDA_ARCH_PTX=8.9 \
 #       -f docker/Dockerfile_GPU .
 #
 #   CUDA_ARCH presets (compile time scales ~linearly with how many you list):
 #       Pascal (GTX 10):     6.1
 #       Volta  (V100):       7.0
-#       Turing (RTX 20, T4): 7.5    <-- default
+#       Turing (RTX 20, T4): 7.5
 #       Ampere (RTX 30, A): 8.6
-#       Ada    (RTX 40):     8.9
+#       Ada    (RTX 40):     8.9    <-- default
 #   Multiple values: --build-arg CUDA_ARCH="7.5;8.6"
+#   CUDA 11.8 is required for native sm_89 compilation. CUDA 11.6 only
+#   supports up to compute_87 and cannot build an RTX 40 native binary.
 #
 # Run (host needs NVIDIA Container Toolkit):
 #   xhost +local:root
@@ -74,12 +77,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # -----------------------------------------------------------------------------
-# 2. CUDA 11.6 dev toolkit (minimal subset, ~700 MB instead of ~3 GB)
+# 2. CUDA 11.8 dev toolkit (minimal subset, ~700 MB instead of ~3 GB)
 #    cuFFT is included because OpenCV 4.x's `cudev` / `core` / `cudaarithm`
 #    modules all link against it unconditionally (cmake fails with
 #    `CUDA_cufft_LIBRARY (ADVANCED) ... NOTFOUND` if it is missing).
 # -----------------------------------------------------------------------------
-ARG CUDA_VER=11-6
+ARG CUDA_VER=11-8
 RUN wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-keyring_1.0-1_all.deb \
         -O /tmp/cuda-keyring.deb && \
     dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb && \
@@ -104,7 +107,8 @@ ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64
 # 3. OpenCV 4.5.5 with CUDA  (slim build: no contrib, whitelisted modules)
 # -----------------------------------------------------------------------------
 ARG OPENCV_VERSION=4.5.5
-ARG CUDA_ARCH=7.5
+ARG CUDA_ARCH=8.9
+ARG CUDA_ARCH_PTX=8.9
 
 # Both opencv main AND opencv_contrib are required:
 #   * In OpenCV 4.x ALL `cuda*` modules (cudev, cudaarithm, cudaimgproc, ...)
@@ -129,7 +133,7 @@ RUN mkdir -p /opt/opencv/build && cd /opt/opencv/build && \
           -D BUILD_LIST="core,imgproc,imgcodecs,videoio,highgui,calib3d,features2d,flann,video,cudev,cudaarithm,cudaimgproc,cudawarping,cudafeatures2d,cudaoptflow,cudastereo,cudafilters,cudalegacy" \
           -D WITH_CUDA=ON \
           -D CUDA_ARCH_BIN="${CUDA_ARCH}" \
-          -D CUDA_ARCH_PTX="" \
+          -D CUDA_ARCH_PTX="${CUDA_ARCH_PTX}" \
           -D ENABLE_FAST_MATH=ON \
           -D CUDA_FAST_MATH=ON \
           -D WITH_CUBLAS=ON \
@@ -185,6 +189,7 @@ RUN cd /opt && git clone https://github.com/fixstars/libSGM.git && \
     cmake -D CMAKE_BUILD_TYPE=Release \
           -D BUILD_OPENCV_WRAPPER=ON \
           -D ENABLE_SAMPLES=OFF \
+          -D CMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH//./}" \
           -D CMAKE_POSITION_INDEPENDENT_CODE=ON \
           .. && \
     make -j16 && make install && ldconfig && \
@@ -206,9 +211,6 @@ RUN mkdir -p ${CATKIN_WS}/src
 WORKDIR ${CATKIN_WS}/src
 
 COPY . ${CATKIN_WS}/src/fishloop_vins
-
-# vins_nodelet_pkg is referenced in package.xml but not bundled in this repo.
-RUN git clone https://github.com/HKUST-Swarm/vins_nodelet_pkg.git || true
 
 # vision_opencv (cv_bridge) overlay: the apt cv_bridge is hard-linked against
 # Ubuntu's apt OpenCV 4.2 (.so.4.2). When fishloop_vins links against our
