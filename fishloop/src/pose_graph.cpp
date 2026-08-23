@@ -353,9 +353,13 @@ vector<int> PoseGraph::detectLoop(KeyFrame* keyframe, int frame_index)
     if (DEBUG_IMAGE)
     {
         int feature_num = keyframe->keypoints.size();
-        cv::resize(keyframe->image, compressed_image, cv::Size(376, 240));
-        putText(compressed_image, "feature_num:" + to_string(feature_num), cv::Point2f(10, 10), cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(255));
-        image_pool[frame_index] = compressed_image;
+		cv::Mat debug_image = keyframe->getDebugImage(0);
+		if (!debug_image.empty())
+		{
+			cv::resize(debug_image, compressed_image, cv::Size(376, 240));
+			putText(compressed_image, "feature_num:" + to_string(feature_num), cv::Point2f(10, 10), cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(255));
+			image_pool[frame_index] = compressed_image;
+		}
     }
     TicToc tmp_t;
     // first query; then add this frame into database
@@ -603,16 +607,6 @@ vector<int> PoseGraph::detectLoopMultiView(KeyFrame* keyframe, int frame_index)
 
 void PoseGraph::addKeyFrameIntoVoc(KeyFrame* keyframe)
 {
-    // put image into image_pool; for visualization
-    cv::Mat compressed_image;
-    if (DEBUG_IMAGE)
-    {
-        int feature_num = keyframe->keypoints.size();
-        cv::resize(keyframe->image, compressed_image, cv::Size(376, 240));
-        putText(compressed_image, "feature_num:" + to_string(feature_num), cv::Point2f(10, 10), cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(255));
-        image_pool[keyframe->index] = compressed_image;
-    }
-
 	const vector<vector<BRIEF::bitset>> &view_descriptors = keyframe->retrieval_view_descriptors;
 	bool added_view = false;
 	for (int view_id = 0; view_id < (int)view_descriptors.size(); ++view_id)
@@ -1125,7 +1119,9 @@ void PoseGraph::savePoseGraph()
         if (DEBUG_IMAGE)
         {
             image_path = POSE_GRAPH_SAVE_PATH + to_string((*it)->index) + "_image.png";
-            imwrite(image_path.c_str(), (*it)->image);
+			cv::Mat debug_image = (*it)->getDebugImage(0);
+			if (!debug_image.empty())
+				imwrite(image_path.c_str(), debug_image);
         }
         Quaterniond VIO_tmp_Q{(*it)->vio_R_w_i};
         Quaterniond PG_tmp_Q{(*it)->R_w_i};

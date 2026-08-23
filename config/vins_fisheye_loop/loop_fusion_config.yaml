@@ -197,10 +197,11 @@ loop_max_translation: 3.0
 # 调试图像与可视化
 #========================
 
-# 是否保存/发布回环匹配调试图。
-# 1 = 保存到 pose_graph_save_path，并发布 /loop_fusion/match_image；
-# 0 = 不保存调试图。大场景建议关闭，否则每个 KeyFrame 会长期持有一张图像。
-save_image: 0
+# 是否保留并发布回环匹配调试图。
+# 1 = 以 JPEG 压缩形式保留关键帧双目图，并在回环接受时发布
+#     /loop_fusion/match_image；原始图和 canonical views 会及时释放。
+# 0 = 不保留、不发布调试图。
+save_image: 1
 
 # IMU 前向可视化偏移，单位像素/显示用。
 # 当前正常运行基本不使用，保留为 0。

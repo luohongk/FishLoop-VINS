@@ -128,18 +128,22 @@ CameraPoseVisualization cameraposevisual(1, 0, 0, 1);
 Eigen::Vector3d last_t(-100, -100, -100);
 double last_image_time = -1;
 
+static const size_t MAX_IMAGE_BUFFER_SIZE = 30;
+static const size_t MAX_KEYFRAME_BUFFER_SIZE = 100;
+
 ros::Publisher pub_point_cloud, pub_margin_cloud;
 
 void new_sequence()
 {
     printf("new sequence\n");
-    sequence++;
+	const int max_sequence = 9;
+	if (sequence < max_sequence)
+		sequence++;
+	else
+		ROS_WARN_THROTTLE(5.0,
+			"reached maximum visualized sequence count (%d); reusing sequence %d",
+			max_sequence, sequence);
     printf("sequence cnt %d \n", sequence);
-    if (sequence > 5)
-    {
-        ROS_WARN("only support 5 sequences since it's boring to copy code for more sequences.");
-        ROS_BREAK();
-    }
     posegraph.posegraph_visualization->reset();
     posegraph.publish();
     skip_first_cnt = 0;
@@ -160,15 +164,19 @@ void image0_callback(const sensor_msgs::ImageConstPtr &image_msg)
     //ROS_INFO("image_callback!");
     m_buf.lock();
     image0_buf.push(image_msg);
+	while (image0_buf.size() > MAX_IMAGE_BUFFER_SIZE)
+		image0_buf.pop();
     m_buf.unlock();
     //printf(" image time %f \n", image_msg->header.stamp.toSec());
 
     // detect unstable camera stream
     if (last_image_time == -1)
         last_image_time = image_msg->header.stamp.toSec();
-    else if (image_msg->header.stamp.toSec() - last_image_time > 1.0 || image_msg->header.stamp.toSec() < last_image_time)
+	else if (image_msg->header.stamp.toSec() - last_image_time > 1.0 || image_msg->header.stamp.toSec() < last_image_time)
     {
-        ROS_WARN("image discontinue! detect a new sequence!");
+		ROS_WARN("image discontinue %.6f -> %.6f (dt=%.6f); detect a new sequence",
+			last_image_time, image_msg->header.stamp.toSec(),
+			image_msg->header.stamp.toSec() - last_image_time);
         new_sequence();
     }
     last_image_time = image_msg->header.stamp.toSec();
@@ -178,6 +186,8 @@ void image1_callback(const sensor_msgs::ImageConstPtr &image_msg)
 {
     std::lock_guard<std::mutex> lock(m_buf);
     image1_buf.push(image_msg);
+	while (image1_buf.size() > MAX_IMAGE_BUFFER_SIZE)
+		image1_buf.pop();
 }
 
 void point_callback(const sensor_msgs::PointCloudConstPtr &point_msg)
@@ -226,6 +236,8 @@ void keyframe_callback(const fishloop_vins::VIOKeyframeConstPtr &keyframe_msg)
 {
     std::lock_guard<std::mutex> lock(m_buf);
     keyframe_buf.push(keyframe_msg);
+	while (keyframe_buf.size() > MAX_KEYFRAME_BUFFER_SIZE)
+		keyframe_buf.pop();
 }
 
 void vio_callback(const nav_msgs::Odometry::ConstPtr &pose_msg)
@@ -831,14 +843,14 @@ int main(int argc, char **argv)
     }
 
     ros::Subscriber sub_vio = n.subscribe("/vins_estimator/odometry", 2000, vio_callback);
-    ros::Subscriber sub_image0 = n.subscribe(IMAGE_TOPIC0, 2000, image0_callback);
-    ros::Subscriber sub_image1 = n.subscribe(IMAGE_TOPIC1, 2000, image1_callback);
-    ros::Subscriber sub_keyframe = n.subscribe("/vins_estimator/viokeyframe", 2000, keyframe_callback);
+	ros::Subscriber sub_image0 = n.subscribe(IMAGE_TOPIC0, 30, image0_callback);
+	ros::Subscriber sub_image1 = n.subscribe(IMAGE_TOPIC1, 30, image1_callback);
+	ros::Subscriber sub_keyframe = n.subscribe("/vins_estimator/viokeyframe", 100, keyframe_callback);
     ros::Subscriber sub_extrinsic = n.subscribe("/vins_estimator/extrinsic", 2000, extrinsic_callback);
     ros::Subscriber sub_point = n.subscribe("/vins_estimator/keyframe_point", 2000, point_callback);
     ros::Subscriber sub_margin_point = n.subscribe("/vins_estimator/margin_cloud", 2000, margin_point_callback);
 
-    pub_match_img = n.advertise<sensor_msgs::Image>("match_image", 1000);
+	pub_match_img = n.advertise<sensor_msgs::Image>("match_image", 1);
     pub_camera_pose_visual = n.advertise<visualization_msgs::MarkerArray>("camera_pose_visual", 1000);
     pub_point_cloud = n.advertise<sensor_msgs::PointCloud>("point_cloud_loop_rect", 1000);
     pub_margin_cloud = n.advertise<sensor_msgs::PointCloud>("margin_cloud_loop_rect", 1000);

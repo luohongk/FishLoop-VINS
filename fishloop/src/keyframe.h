@@ -133,6 +133,7 @@ public:
 	Eigen::Vector3d getLoopRelativeT();
 	double getLoopRelativeYaw();
 	Eigen::Quaterniond getLoopRelativeQ();
+	cv::Mat getDebugImage(int camera_id) const;
 
 
 
@@ -147,6 +148,8 @@ public:
 	Eigen::Matrix3d origin_vio_R;
 	cv::Mat image;
 	cv::Mat image_right;
+	vector<uchar> debug_image_encoded;
+	vector<uchar> debug_image_right_encoded;
 	cv::Mat thumbnail;
 	vector<cv::Point3f> point_3d; 
 	vector<cv::Point2f> point_2d_uv;

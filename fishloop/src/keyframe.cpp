@@ -51,6 +51,173 @@ static float canonicalPatchAngle(const cv::Mat &image, const cv::Point2f &point)
 	return cv::fastAtan2((float)m01, (float)m10);
 }
 
+static cv::Mat loopDebugBgr(const cv::Mat &image)
+{
+	if (image.empty())
+		return cv::Mat();
+	cv::Mat image_8u;
+	if (image.depth() == CV_8U)
+		image_8u = image;
+	else
+		image.convertTo(image_8u, CV_8U);
+	cv::Mat bgr;
+	if (image_8u.channels() == 1)
+		cv::cvtColor(image_8u, bgr, cv::COLOR_GRAY2BGR);
+	else if (image_8u.channels() == 3)
+		bgr = image_8u.clone();
+	else if (image_8u.channels() == 4)
+		cv::cvtColor(image_8u, bgr, cv::COLOR_BGRA2BGR);
+	return bgr;
+}
+
+static bool encodeLoopDebugImage(const cv::Mat &image, vector<uchar> &encoded,
+	int keyframe_index, int camera_id)
+{
+	encoded.clear();
+	if (image.empty())
+		return false;
+	try
+	{
+		const vector<int> parameters = {cv::IMWRITE_JPEG_QUALITY, 80};
+		if (cv::imencode(".jpg", image, encoded, parameters))
+			return true;
+	}
+	catch (const cv::Exception &error)
+	{
+		ROS_WARN("[loop_fusion] failed to compress debug image kf=%d cam=%d: %s",
+			keyframe_index, camera_id, error.what());
+	}
+	encoded.clear();
+	return false;
+}
+
+static void publishLoopMatchImage(
+	const KeyFrame &current_kf, const KeyFrame &old_kf,
+	const vector<cv::Point2f> &matched_2d_cur,
+	const vector<cv::Point2f> &matched_2d_old,
+	const vector<int> &matched_camera_cur,
+	const vector<int> &matched_camera_old,
+	const vector<int> &inlier_match_indices)
+{
+	if (!DEBUG_IMAGE || inlier_match_indices.empty())
+		return;
+	if (pub_match_img.getNumSubscribers() == 0)
+		return;
+
+	const int camera_gap = 8;
+	const int match_gap = 16;
+	const int header_height = 48;
+	vector<cv::Mat> current_images = {
+		loopDebugBgr(current_kf.getDebugImage(0)),
+		loopDebugBgr(current_kf.getDebugImage(1))};
+	vector<cv::Mat> old_images = {
+		loopDebugBgr(old_kf.getDebugImage(0)),
+		loopDebugBgr(old_kf.getDebugImage(1))};
+	vector<cv::Point> current_origins(2, cv::Point(-1, -1));
+	vector<cv::Point> old_origins(2, cv::Point(-1, -1));
+
+	auto sideSize = [camera_gap](const vector<cv::Mat> &images)
+	{
+		cv::Size size(0, 0);
+		for (const cv::Mat &image : images)
+		{
+			if (image.empty())
+				continue;
+			size.width = std::max(size.width, image.cols);
+			size.height += image.rows;
+		}
+		if (!images[0].empty() && !images[1].empty())
+			size.height += camera_gap;
+		return size;
+	};
+	const cv::Size current_size = sideSize(current_images);
+	const cv::Size old_size = sideSize(old_images);
+	if (current_size.width == 0 || old_size.width == 0)
+	{
+		ROS_WARN_THROTTLE(5.0,
+			"[loop_fusion] cannot publish match image: retained keyframe image is empty");
+		return;
+	}
+
+	const int canvas_height = header_height +
+		std::max(current_size.height, old_size.height);
+	const int old_side_x = current_size.width + match_gap;
+	cv::Mat canvas(canvas_height, current_size.width + match_gap + old_size.width,
+		CV_8UC3, cv::Scalar(32, 32, 32));
+	auto copySide = [header_height, camera_gap](const vector<cv::Mat> &images,
+		int side_x, vector<cv::Point> &origins, cv::Mat &canvas_image)
+	{
+		int y = header_height;
+		for (int camera_id = 0; camera_id < (int)images.size(); ++camera_id)
+		{
+			if (images[camera_id].empty())
+				continue;
+			origins[camera_id] = cv::Point(side_x, y);
+			images[camera_id].copyTo(canvas_image(
+				cv::Rect(side_x, y, images[camera_id].cols, images[camera_id].rows)));
+			cv::putText(canvas_image, "cam" + to_string(camera_id),
+				cv::Point(side_x + 8, y + 24), cv::FONT_HERSHEY_SIMPLEX,
+				0.65, cv::Scalar(0, 255, 255), 2, cv::LINE_AA);
+			y += images[camera_id].rows + camera_gap;
+		}
+	};
+	copySide(current_images, 0, current_origins, canvas);
+	copySide(old_images, old_side_x, old_origins, canvas);
+
+	cv::putText(canvas,
+		"current: " + to_string(current_kf.index) + "  seq: " +
+			to_string(current_kf.sequence),
+		cv::Point(12, 31), cv::FONT_HERSHEY_SIMPLEX, 0.75,
+		cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
+	cv::putText(canvas,
+		"previous: " + to_string(old_kf.index) + "  seq: " +
+			to_string(old_kf.sequence),
+		cv::Point(old_side_x + 12, 31), cv::FONT_HERSHEY_SIMPLEX, 0.75,
+		cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
+
+	int drawn_inliers = 0;
+	for (int match_index : inlier_match_indices)
+	{
+		if (match_index < 0 || match_index >= (int)matched_2d_cur.size() ||
+			match_index >= (int)matched_2d_old.size() ||
+			match_index >= (int)matched_camera_cur.size() ||
+			match_index >= (int)matched_camera_old.size())
+			continue;
+		const int current_camera = matched_camera_cur[match_index];
+		const int old_camera = matched_camera_old[match_index];
+		if (current_camera < 0 || current_camera >= (int)current_origins.size() ||
+			old_camera < 0 || old_camera >= (int)old_origins.size() ||
+			current_origins[current_camera].x < 0 || old_origins[old_camera].x < 0)
+			continue;
+		const cv::Point2f current_point = matched_2d_cur[match_index] +
+			cv::Point2f(current_origins[current_camera]);
+		const cv::Point2f old_point = matched_2d_old[match_index] +
+			cv::Point2f(old_origins[old_camera]);
+		cv::line(canvas, current_point, old_point, cv::Scalar(0, 220, 0),
+			1, cv::LINE_AA);
+		cv::circle(canvas, current_point, 4, cv::Scalar(0, 255, 0), 2,
+			cv::LINE_AA);
+		cv::circle(canvas, old_point, 4, cv::Scalar(0, 255, 0), 2,
+			cv::LINE_AA);
+		drawn_inliers++;
+	}
+	if (drawn_inliers == 0)
+		return;
+
+	const double max_display_width = 1600.0;
+	if (canvas.cols > max_display_width)
+	{
+		const double scale = max_display_width / canvas.cols;
+		cv::resize(canvas, canvas, cv::Size(), scale, scale, cv::INTER_AREA);
+	}
+	sensor_msgs::ImagePtr msg = cv_bridge::CvImage(
+		std_msgs::Header(), "bgr8", canvas).toImageMsg();
+	msg->header.stamp = ros::Time(current_kf.time_stamp);
+	pub_match_img.publish(msg);
+	ROS_INFO("[loop_fusion] published match image cur=%d old=%d inliers=%d",
+		current_kf.index, old_kf.index, drawn_inliers);
+}
+
 // create keyframe online
 KeyFrame::KeyFrame(double _time_stamp, int _index, Vector3d &_vio_T_w_i, Matrix3d &_vio_R_w_i,
 			   cv::Mat &_image, cv::Mat &_image_right,
@@ -228,12 +395,19 @@ KeyFrame::KeyFrame(double _time_stamp, int _index, Vector3d &_vio_T_w_i, Matrix3
 				rotation_error, translation_error);
 		}
 	}
-	if(!DEBUG_IMAGE)
+	if (DEBUG_IMAGE)
 	{
-		image.release();
-		image_right.release();
-		canonical_views.clear();
+		encodeLoopDebugImage(image, debug_image_encoded, index, 0);
+		encodeLoopDebugImage(image_right, debug_image_right_encoded, index, 1);
 	}
+	// The raw images and the ten canonical views are only needed while building
+	// this keyframe's descriptors. Keep compressed debug copies instead of
+	// retaining roughly 5.6 MB of image Mats for every keyframe.
+	if (!DEBUG_IMAGE || !debug_image_encoded.empty())
+		image.release();
+	if (!DEBUG_IMAGE || !debug_image_right_encoded.empty())
+		image_right.release();
+	canonical_views.clear();
 }
 
 // load previous keyframe
@@ -252,7 +426,12 @@ KeyFrame::KeyFrame(double _time_stamp, int _index, Vector3d &_vio_T_w_i, Matrix3
 	if (DEBUG_IMAGE)
 	{
 		image = _image.clone();
-		cv::resize(image, thumbnail, cv::Size(80, 60));
+		if (!image.empty())
+		{
+			cv::resize(image, thumbnail, cv::Size(80, 60));
+			if (encodeLoopDebugImage(image, debug_image_encoded, index, 0))
+				image.release();
+		}
 	}
 	if (_loop_index != -1)
 		has_loop = true;
@@ -265,6 +444,38 @@ KeyFrame::KeyFrame(double _time_stamp, int _index, Vector3d &_vio_T_w_i, Matrix3
 	keypoints = _keypoints;
 	keypoints_norm = _keypoints_norm;
 	brief_descriptors = _brief_descriptors;
+}
+
+cv::Mat KeyFrame::getDebugImage(int camera_id) const
+{
+	const vector<uchar> *encoded = NULL;
+	const cv::Mat *fallback = NULL;
+	if (camera_id == 0)
+	{
+		encoded = &debug_image_encoded;
+		fallback = &image;
+	}
+	else if (camera_id == 1)
+	{
+		encoded = &debug_image_right_encoded;
+		fallback = &image_right;
+	}
+	else
+		return cv::Mat();
+
+	if (!encoded->empty())
+	{
+		try
+		{
+			return cv::imdecode(*encoded, cv::IMREAD_UNCHANGED);
+		}
+		catch (const cv::Exception &error)
+		{
+			ROS_WARN("[loop_fusion] failed to decode debug image kf=%d cam=%d: %s",
+				index, camera_id, error.what());
+		}
+	}
+	return fallback->empty() ? cv::Mat() : fallback->clone();
 }
 
 
@@ -1103,6 +1314,7 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	vector<cv::Point3f> matched_3d;
 	vector<double> matched_id;
 	vector<uchar> status;
+	vector<int> matched_camera_cur;
 	vector<int> matched_camera_old;
 	vector<int> matched_feature_old;
 
@@ -1110,6 +1322,9 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	matched_2d_cur = point_2d_uv;
 	matched_2d_cur_norm = point_2d_norm;
 	matched_id = point_id;
+	matched_camera_cur.assign(matched_3d.size(), -1);
+	for (int i = 0; i < std::min<int>(matched_camera_cur.size(), loop_features.size()); ++i)
+		matched_camera_cur[i] = loop_features[i].camera_id;
 
 	TicToc t_match;
 	#if 0
@@ -1221,6 +1436,7 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	reduceVector(matched_2d_old_norm, status);
 	reduceVector(matched_3d, status);
 	reduceVector(matched_id, status);
+	reduceVector(matched_camera_cur, status);
 	reduceVector(matched_camera_old, status);
 	reduceVector(matched_feature_old, status);
 	const int eucm_descriptor_matches = matched_3d.size();
@@ -1442,6 +1658,7 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 		int inliers = 0;
 		Eigen::Vector3d T = Eigen::Vector3d::Zero();
 		Eigen::Matrix3d R = Eigen::Matrix3d::Identity();
+		vector<int> inlier_match_indices;
 	};
 	vector<CameraPnPResult> camera_results;
 	const int per_camera_min = forced_geometry_active ? required_pnp_inliers :
@@ -1450,6 +1667,7 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	{
 		vector<cv::Point2f> camera_points_2d;
 		vector<cv::Point3f> camera_points_3d;
+		vector<int> camera_match_indices;
 		for (int i = 0; i < (int)matched_3d.size(); ++i)
 		{
 			if (i >= (int)matched_camera_old.size() || matched_camera_old[i] != camera_id)
@@ -1469,6 +1687,7 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 				continue;
 			camera_points_2d.push_back(matched_2d_old_norm[i]);
 			camera_points_3d.push_back(matched_3d[i]);
+			camera_match_indices.push_back(i);
 		}
 		if ((int)camera_points_3d.size() < per_camera_min)
 		{
@@ -1483,6 +1702,9 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 		const bool pnp_solved = PnPRANSAC(camera_points_2d, camera_points_3d, camera_status,
 			result.T, result.R, camera_id);
 		result.inliers = std::count(camera_status.begin(), camera_status.end(), (uchar)1);
+		for (int i = 0; i < std::min<int>(camera_status.size(), camera_match_indices.size()); ++i)
+			if (camera_status[i])
+				result.inlier_match_indices.push_back(camera_match_indices[i]);
 		ROS_INFO("[loop_fusion][EUCM-PnP] cur=%d old=%d cam=%d matches=%zu solved=%d inliers=%d",
 			index, old_kf->index, camera_id, camera_points_3d.size(),
 			pnp_solved ? 1 : 0, result.inliers);
@@ -1543,6 +1765,9 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 				"inliers=%d best_ratio=%.2f yaw=%.2f/%.2f t=%.2f",
 				index, old_kf->index, camera_results.size(), total_camera_inliers,
 				best_inlier_ratio, relative_yaw, max_loop_yaw, relative_t.norm());
+			publishLoopMatchImage(*this, *old_kf, matched_2d_cur, matched_2d_old,
+				matched_camera_cur, matched_camera_old,
+				best_result->inlier_match_indices);
 			return true;
 		}
 		ROS_INFO("[loop_fusion][EUCM-PnP] rejected pose cur=%d old=%d cameras=%zu inliers=%d yaw=%.2f/%.2f t=%.2f/%.2f",
