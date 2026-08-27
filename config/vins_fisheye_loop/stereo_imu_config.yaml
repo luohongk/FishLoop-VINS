@@ -113,7 +113,7 @@ use_orb: 0
 warn_imu_freq: 0
 warn_imu_duration: 0
 imu_freq: 200
-image_freq: 30
+image_freq: 25
 
 #optimization parameters
 max_solver_time: 0.04

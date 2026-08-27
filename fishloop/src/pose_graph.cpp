@@ -94,19 +94,45 @@ void PoseGraph::addKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
 	int loop_index = -1;
 	KeyFrame* old_kf = NULL;
 	vector<int> loop_candidates;
+	size_t dense_fallback_candidates = 1;
     if (flag_detect_loop)
     {
         TicToc tmp_t;
 		loop_candidates = detectLoop(cur_kf, cur_kf->index);
     }
-    else
+	else
     {
         addKeyFrameIntoVoc(cur_kf);
 	}
-	for (int candidate_index : loop_candidates)
+	if (!loop_candidates.empty())
 	{
+		if (!LOOP_PRESERVE_ORIGINAL_FLOW)
+		{
+			const int seed_index = loop_candidates.front();
+			const int reranked_index = rerankCandidateNeighborhood(
+				cur_kf, seed_index);
+			if (reranked_index >= 0 && reranked_index != seed_index)
+			{
+				loop_candidates.erase(std::remove(loop_candidates.begin() + 1,
+					loop_candidates.end(), reranked_index), loop_candidates.end());
+				loop_candidates.insert(loop_candidates.begin() + 1, reranked_index);
+				dense_fallback_candidates = 2;
+			}
+		}
+	}
+	for (size_t candidate_rank = 0; candidate_rank < loop_candidates.size(); ++candidate_rank)
+	{
+		if (LOOP_PRESERVE_ORIGINAL_FLOW && candidate_rank > 0)
+			break;
+		const int candidate_index = loop_candidates[candidate_rank];
 		KeyFrame* candidate_kf = getKeyFrame(candidate_index);
-		if (candidate_kf != NULL && cur_kf->findConnection(candidate_kf))
+		// Preserve the original DBoW seed, but also give a distinct neighborhood-
+		// reranked best frame the dense-old verification it was selected with.
+		// Other lower-ranked DBoW candidates remain exact-only to bound runtime.
+		const bool allow_dense_fallback = !LOOP_PRESERVE_ORIGINAL_FLOW &&
+			candidate_rank < dense_fallback_candidates;
+		if (candidate_kf != NULL &&
+			cur_kf->findConnection(candidate_kf, allow_dense_fallback))
 		{
 			loop_index = candidate_index;
 			old_kf = candidate_kf;
@@ -257,16 +283,39 @@ void PoseGraph::loadKeyFrame(KeyFrame* cur_kf, bool flag_detect_loop)
     global_index++;
 	int loop_index = -1;
 	vector<int> loop_candidates;
+	size_t dense_fallback_candidates = 1;
     if (flag_detect_loop)
 		loop_candidates = detectLoop(cur_kf, cur_kf->index);
     else
     {
         addKeyFrameIntoVoc(cur_kf);
     }
-	for (int candidate_index : loop_candidates)
+	if (!loop_candidates.empty())
 	{
+		if (!LOOP_PRESERVE_ORIGINAL_FLOW)
+		{
+			const int seed_index = loop_candidates.front();
+			const int reranked_index = rerankCandidateNeighborhood(
+				cur_kf, seed_index);
+			if (reranked_index >= 0 && reranked_index != seed_index)
+			{
+				loop_candidates.erase(std::remove(loop_candidates.begin() + 1,
+					loop_candidates.end(), reranked_index), loop_candidates.end());
+				loop_candidates.insert(loop_candidates.begin() + 1, reranked_index);
+				dense_fallback_candidates = 2;
+			}
+		}
+	}
+	for (size_t candidate_rank = 0; candidate_rank < loop_candidates.size(); ++candidate_rank)
+	{
+		if (LOOP_PRESERVE_ORIGINAL_FLOW && candidate_rank > 0)
+			break;
+		const int candidate_index = loop_candidates[candidate_rank];
 		KeyFrame* old_kf = getKeyFrame(candidate_index);
-		if (old_kf == NULL || !cur_kf->findConnection(old_kf))
+		if (old_kf == NULL ||
+			!cur_kf->findConnection(old_kf,
+				!LOOP_PRESERVE_ORIGINAL_FLOW &&
+				candidate_rank < dense_fallback_candidates))
 			continue;
 		loop_index = candidate_index;
 		printf(" %d detect loop with %d \n", cur_kf->index, loop_index);
@@ -344,9 +393,152 @@ KeyFrame* PoseGraph::getKeyFrame(int index)
         return NULL;
 }
 
+int PoseGraph::rerankCandidateNeighborhood(KeyFrame* keyframe, int seed_index)
+{
+	if (keyframe == NULL || seed_index < 0 ||
+		LOOP_CANDIDATE_NEIGHBOR_WINDOW <= 0)
+		return seed_index;
+
+	struct CandidateSupport
+	{
+		int index = -1;
+		int mutual = 0;
+		int camera0 = 0;
+		int camera1 = 0;
+		int usable_cameras = 0;
+		int pnp_support = 0;
+		double mean_distance = 1e9;
+	};
+	auto score_candidate = [&](int candidate_index)
+	{
+		CandidateSupport support;
+		support.index = candidate_index;
+		KeyFrame* old_kf = getKeyFrame(candidate_index);
+		if (old_kf == NULL || old_kf->orb_descriptors.empty())
+			return support;
+
+		vector<cv::Point2f> matched_uv;
+		vector<cv::Point2f> matched_norm;
+		vector<uchar> status;
+		vector<int> matched_cameras;
+		vector<int> matched_features;
+		const OrbMatchStats stats = keyframe->searchByORBDes(
+			matched_uv, matched_norm, status, matched_cameras, matched_features,
+			old_kf, true, LOOP_ORB_EXACT_DENSE_DIST_TH,
+			LOOP_ORB_EXACT_DENSE_RATIO_TH);
+		support.mutual = stats.mutual_unique_pass;
+		support.mean_distance = stats.mean_best_distance;
+		const int count = std::min<int>(status.size(), matched_cameras.size());
+		for (int i = 0; i < count; ++i)
+		{
+			if (!status[i])
+				continue;
+			if (matched_cameras[i] == 0)
+				support.camera0++;
+			else if (matched_cameras[i] == 1)
+				support.camera1++;
+		}
+		support.usable_cameras =
+			(support.camera0 >= LOOP_PER_CAMERA_MIN_INLIERS ? 1 : 0) +
+			(support.camera1 >= LOOP_PER_CAMERA_MIN_INLIERS ? 1 : 0);
+		support.pnp_support =
+			(support.camera0 >= LOOP_PER_CAMERA_MIN_INLIERS ? support.camera0 : 0) +
+			(support.camera1 >= LOOP_PER_CAMERA_MIN_INLIERS ? support.camera1 : 0);
+		return support;
+	};
+	auto better = [](const CandidateSupport &a, const CandidateSupport &b)
+	{
+		if (a.usable_cameras != b.usable_cameras)
+			return a.usable_cameras > b.usable_cameras;
+		if (a.pnp_support != b.pnp_support)
+			return a.pnp_support > b.pnp_support;
+		if (a.mutual != b.mutual)
+			return a.mutual > b.mutual;
+		return a.mean_distance < b.mean_distance;
+	};
+
+	TicToc rerank_timer;
+	CandidateSupport seed = score_candidate(seed_index);
+	CandidateSupport best = seed;
+	int scanned = 1;
+	const int stride = std::max(1, LOOP_CANDIDATE_NEIGHBOR_STRIDE);
+	const int begin = std::max(0, seed_index - LOOP_CANDIDATE_NEIGHBOR_WINDOW);
+	const int end = std::min(keyframe->index - LOOP_MIN_QUERY_GAP - 1,
+		seed_index + LOOP_CANDIDATE_NEIGHBOR_WINDOW);
+	for (int candidate_index = begin; candidate_index <= end;
+		candidate_index += stride)
+	{
+		if (candidate_index == seed_index)
+			continue;
+		const CandidateSupport candidate = score_candidate(candidate_index);
+		scanned++;
+		if (better(candidate, best))
+			best = candidate;
+	}
+
+	ROS_INFO("[loop_fusion][neighbor-rerank] cur=%d seed=%d m=%d cams=%d/%d "
+		"best=%d offset=%+d m=%d cams=%d/%d usable=%d support=%d scanned=%d %.2fms",
+		keyframe->index, seed.index, seed.mutual, seed.camera0, seed.camera1,
+		best.index, best.index - seed.index, best.mutual, best.camera0,
+		best.camera1, best.usable_cameras, best.pnp_support, scanned,
+		rerank_timer.toc());
+	return best.index >= 0 ? best.index : seed_index;
+}
+
 vector<int> PoseGraph::detectLoop(KeyFrame* keyframe, int frame_index)
 {
-	return detectLoopMultiView(keyframe, frame_index);
+	if (!LOOP_PRESERVE_ORIGINAL_FLOW)
+		return detectLoopMultiView(keyframe, frame_index);
+
+	// Preserve the stock VINS-Fusion semantics: one DBoW document per
+	// keyframe, query before insertion, require a strong nearest-neighbour and
+	// a second supporting result, then geometrically verify one old keyframe.
+	QueryResults vins_ret;
+	int max_entry_id = -1;
+	const int max_frame_id = frame_index - LOOP_MIN_QUERY_GAP;
+	for (int entry_id = 0; entry_id < (int)db_entry_frames.size(); ++entry_id)
+		if (db_entry_frames[entry_id] <= max_frame_id)
+			max_entry_id = entry_id;
+	if (max_entry_id >= 0)
+		db.query(keyframe->retrieval_brief_descriptors, vins_ret,
+			LOOP_DBOW_MAX_RESULTS, max_entry_id);
+	addKeyFrameIntoVoc(keyframe);
+
+	bool supported = false;
+	if (vins_ret.size() >= 2 &&
+		vins_ret[0].Score > LOOP_DBOW_MIN_NEIGHBOR_SCORE)
+		for (size_t i = 1; i < vins_ret.size(); ++i)
+			if (vins_ret[i].Score > LOOP_DBOW_MIN_CANDIDATE_SCORE)
+			{
+				supported = true;
+				break;
+			}
+
+	int selected_frame = -1;
+	if (supported && frame_index > LOOP_MIN_DETECT_INDEX)
+		for (const Result &result : vins_ret)
+		{
+			if (result.Score <= LOOP_DBOW_MIN_CANDIDATE_SCORE ||
+				(int)result.Id >= (int)db_entry_frames.size())
+				continue;
+			const int old_frame = db_entry_frames[result.Id];
+			if (old_frame >= 0 &&
+				(selected_frame < 0 || old_frame < selected_frame))
+				selected_frame = old_frame;
+		}
+
+	std::ostringstream scores;
+	for (int i = 0; i < std::min<int>(vins_ret.size(), 4); ++i)
+	{
+		const int old_frame = (int)vins_ret[i].Id < (int)db_entry_frames.size()
+			? db_entry_frames[vins_ret[i].Id] : -1;
+		scores << " " << old_frame << ":" << vins_ret[i].Score;
+	}
+	ROS_INFO_THROTTLE(2.0,
+		"[loop_fusion][vins-dbow] frame=%d descriptors=%zu top=%s selected=%d",
+		frame_index, keyframe->retrieval_brief_descriptors.size(),
+		scores.str().c_str(), selected_frame);
+	return selected_frame >= 0 ? vector<int>{selected_frame} : vector<int>();
 
     // put image into image_pool; for visualization
     cv::Mat compressed_image;
@@ -612,6 +804,22 @@ vector<int> PoseGraph::detectLoopMultiView(KeyFrame* keyframe, int frame_index)
 
 void PoseGraph::addKeyFrameIntoVoc(KeyFrame* keyframe)
 {
+	if (LOOP_PRESERVE_ORIGINAL_FLOW)
+	{
+		const vector<BRIEF::bitset> &descriptors =
+			keyframe->retrieval_brief_descriptors.empty()
+				? keyframe->brief_descriptors
+				: keyframe->retrieval_brief_descriptors;
+		const EntryId entry_id = db.add(descriptors);
+		if ((int)db_entry_frames.size() <= (int)entry_id)
+		{
+			db_entry_frames.resize(entry_id + 1, -1);
+			db_entry_views.resize(entry_id + 1, -1);
+		}
+		db_entry_frames[entry_id] = keyframe->index;
+		db_entry_views[entry_id] = -1;
+		return;
+	}
 	const vector<vector<BRIEF::bitset>> &view_descriptors = keyframe->retrieval_view_descriptors;
 	bool added_view = false;
 	for (int view_id = 0; view_id < (int)view_descriptors.size(); ++view_id)
@@ -1298,4 +1506,12 @@ void PoseGraph::publish()
     }
     pub_base_path.publish(base_path);
     //posegraph_visualization->publish_by(pub_pose_graph, path[sequence_cnt].header);
+}
+
+nav_msgs::Path PoseGraph::pathSnapshot(int sequence_id)
+{
+    std::lock_guard<std::mutex> lock(m_keyframelist);
+    if (sequence_id < 1 || sequence_id >= 10)
+        return nav_msgs::Path();
+    return path[sequence_id];
 }

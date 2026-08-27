@@ -114,6 +114,7 @@ class VinsNodeBaseClass {
 
 
         double t_last = 0;
+        double last_accepted_image_time = -1.0;
 
         double last_time;
         
@@ -142,6 +143,8 @@ class VinsNodeBaseClass {
         void pack_and_send_thread(const ros::TimerEvent & e);
 
         void processFlattened(const ros::TimerEvent & e);
+
+        bool shouldProcessImage(double stamp);
 
         void fisheye_imgs_callback(const sensor_msgs::ImageConstPtr &img1_msg, const sensor_msgs::ImageConstPtr &img2_msg);
         

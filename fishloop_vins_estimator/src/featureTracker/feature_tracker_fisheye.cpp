@@ -144,15 +144,6 @@ FeatureFrame FisheyeFeatureTrackerOpenMP::trackImage(double _cur_time, cv::Input
             }
         }
 
-        #pragma omp section 
-        {
-            if (enable_down_top) {
-                // printf("Start track down top\n");
-                cur_down_top_pts = opticalflow_track(down_top_img, down_top_pyr, prev_down_top_img, prev_down_top_pyr, 
-                    prev_down_top_pts, ids_down_top, track_down_top_cnt, removed_pts, predict_down_top);
-                // printf("End track down top\n");
-            }
-        }
     }
        
     set_predict_lock.unlock();
@@ -174,18 +165,15 @@ FeatureFrame FisheyeFeatureTrackerOpenMP::trackImage(double _cur_time, cv::Input
 
         #pragma omp section
         {
-            if (enable_down_top) {
-                detectPoints(down_top_img, cv::Mat(), n_pts_down_top, cur_down_top_pts, TOP_PTS_CNT);
-            }
-        }
-
-        #pragma omp section
-        {
             if (enable_up_side) {
                 detectPoints(up_side_img, cv::Mat(), n_pts_up_side, cur_up_side_pts, SIDE_PTS_CNT);
             }
         }
     }
+
+    // The right top image must share IDs with the left top image.  Treating it
+    // as an independent detector/temporal tracker produces no stereo pairs.
+    n_pts_down_top.clear();
 
     // ROS_INFO("Detect cost %fms", t_d.toc());
 
@@ -197,6 +185,17 @@ FeatureFrame FisheyeFeatureTrackerOpenMP::trackImage(double _cur_time, cv::Input
     
     TicToc t_tk;
     {
+        if (enable_down_top && !cur_up_top_pts.empty()) {
+            ids_down_top = ids_up_top;
+            track_down_top_cnt.clear();
+            std::vector<cv::Point2f> down_top_init_pts = cur_up_top_pts;
+            cur_down_top_pts = opticalflow_track(down_top_img, down_top_pyr,
+                up_top_img, up_top_pyr, down_top_init_pts, ids_down_top,
+                track_down_top_cnt, removed_pts, predict_down_top);
+            ROS_INFO_THROTTLE(2.0,
+                "[fisheye_stereo][top] left=%zu right=%zu",
+                cur_up_top_pts.size(), cur_down_top_pts.size());
+        }
         if (enable_down_side) {
             ids_down_side = ids_up_side;
             std::vector<cv::Point2f> down_side_init_pts = cur_up_side_pts;

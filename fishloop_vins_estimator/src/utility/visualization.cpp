@@ -18,6 +18,7 @@
 #include <cmath>
 #include <deque>
 #include <mutex>
+#include <std_msgs/Empty.h>
 #include <utility>
 
 using namespace ros;
@@ -40,6 +41,7 @@ ros::Publisher pub_extrinsic;
 ros::Publisher pub_viokeyframe;
 ros::Publisher pub_viononkeyframe;
 ros::Publisher pub_bias;
+ros::Publisher pub_estimator_reset;
 
 CameraPoseVisualization cameraposevisual(1, 0, 0, 1);
 static double sum_of_path = 0;
@@ -60,7 +62,11 @@ struct KeyframePublication
 
 std::deque<KeyframePublication> warmup_keyframes;
 std::mutex warmup_keyframes_mutex;
-constexpr size_t kMaxWarmupKeyframes = 64;
+// At the observed keyframe rate a full 12-second initial validation interval
+// can contain more than 100 keyframes. Keep the complete attempt so a healthy
+// first initialization also retains its trajectory beginning.
+constexpr size_t kMaxWarmupKeyframes = 192;
+std::mutex vio_path_mutex;
 }
 
 static camodocal::CameraPtr loopFusionCamera(int camera_id)
@@ -104,6 +110,7 @@ void registerPub(ros::NodeHandle &n)
     pub_viononkeyframe = n.advertise<fishloop_vins::VIOKeyframe>("viononkeyframe", 1000);
     pub_flatten_images = n.advertise<fishloop_vins::FlattenImages>("flatten_images", 1000);
     pub_bias = n.advertise<sensor_msgs::Imu>("imu_bias", 1000);
+    pub_estimator_reset = n.advertise<std_msgs::Empty>("reset", 10);
 
     cameraposevisual.setScale(0.1);
     cameraposevisual.setLineWidth(0.01);
@@ -185,59 +192,91 @@ void printStatistics(const Estimator &estimator, double t)
     ROS_DEBUG("sum of path %f", sum_of_path);
 }
 
-void pubOdometry(const Estimator &estimator, const std_msgs::Header &header)
+namespace
 {
+struct WarmupOdometryPublication
+{
+    nav_msgs::Odometry odometry;
+    double td_ms = 0.0;
+};
 
-    
-    if (estimator.solver_flag == Estimator::SolverFlag::NON_LINEAR)
+std::deque<WarmupOdometryPublication> warmup_odometry;
+std::mutex warmup_odometry_mutex;
+constexpr size_t kMaxWarmupOdometry = 256;
+
+nav_msgs::Odometry buildOdometryMessage(const Estimator &estimator,
+                                        const std_msgs::Header &header)
+{
+    nav_msgs::Odometry odometry;
+    odometry.header = header;
+    odometry.header.frame_id = "world";
+    odometry.child_frame_id = "odometry";
+    Quaterniond orientation(estimator.Rs[WINDOW_SIZE]);
+    orientation.normalize();
+    odometry.pose.pose.position.x = estimator.Ps[WINDOW_SIZE].x();
+    odometry.pose.pose.position.y = estimator.Ps[WINDOW_SIZE].y();
+    odometry.pose.pose.position.z = estimator.Ps[WINDOW_SIZE].z();
+    odometry.pose.pose.orientation.x = orientation.x();
+    odometry.pose.pose.orientation.y = orientation.y();
+    odometry.pose.pose.orientation.z = orientation.z();
+    odometry.pose.pose.orientation.w = orientation.w();
+    odometry.twist.twist.linear.x = estimator.Vs[WINDOW_SIZE].x();
+    odometry.twist.twist.linear.y = estimator.Vs[WINDOW_SIZE].y();
+    odometry.twist.twist.linear.z = estimator.Vs[WINDOW_SIZE].z();
+    return odometry;
+}
+
+void publishOdometryMessage(const nav_msgs::Odometry &odometry, double td_ms)
+{
+    pub_odometry.publish(odometry);
+
+    geometry_msgs::PoseStamped pose_stamped;
+    pose_stamped.header = odometry.header;
+    pose_stamped.header.frame_id = "world";
+    pose_stamped.pose = odometry.pose.pose;
     {
-        nav_msgs::Odometry odometry;
-        odometry.header = header;
-        odometry.header.frame_id = "world";
-        odometry.child_frame_id = "odometry";
-        Quaterniond tmp_Q;
-        tmp_Q = Quaterniond(estimator.Rs[WINDOW_SIZE]);
-        odometry.pose.pose.position.x = estimator.Ps[WINDOW_SIZE].x();
-        odometry.pose.pose.position.y = estimator.Ps[WINDOW_SIZE].y();
-        odometry.pose.pose.position.z = estimator.Ps[WINDOW_SIZE].z();
-        odometry.pose.pose.orientation.x = tmp_Q.x();
-        odometry.pose.pose.orientation.y = tmp_Q.y();
-        odometry.pose.pose.orientation.z = tmp_Q.z();
-        odometry.pose.pose.orientation.w = tmp_Q.w();
-        odometry.twist.twist.linear.x = estimator.Vs[WINDOW_SIZE].x();
-        odometry.twist.twist.linear.y = estimator.Vs[WINDOW_SIZE].y();
-        odometry.twist.twist.linear.z = estimator.Vs[WINDOW_SIZE].z();
-        pub_odometry.publish(odometry);
-
-        geometry_msgs::PoseStamped pose_stamped;
-        pose_stamped.header = header;
-        pose_stamped.header.frame_id = "world";
-        pose_stamped.pose = odometry.pose.pose;
-        path.header = header;
+        std::lock_guard<std::mutex> lock(vio_path_mutex);
+        path.header = odometry.header;
         path.header.frame_id = "world";
         path.poses.push_back(pose_stamped);
         pub_path.publish(path);
+    }
 
-        // write result to file
-        ofstream foutC(VINS_RESULT_PATH, ios::app);
-        foutC.setf(ios::fixed, ios::floatfield);
-        foutC.precision(0);
-        foutC << header.stamp.toSec() * 1e9 << ",";
-        foutC.precision(5);
-        foutC << estimator.Ps[WINDOW_SIZE].x() << ","
-              << estimator.Ps[WINDOW_SIZE].y() << ","
-              << estimator.Ps[WINDOW_SIZE].z() << ","
-              << tmp_Q.w() << ","
-              << tmp_Q.x() << ","
-              << tmp_Q.y() << ","
-              << tmp_Q.z() << ","
-              << estimator.Vs[WINDOW_SIZE].x() << ","
-              << estimator.Vs[WINDOW_SIZE].y() << ","
-              << estimator.Vs[WINDOW_SIZE].z() << "," << endl;
-        foutC.close();
-        Eigen::Vector3d tmp_T = estimator.Ps[WINDOW_SIZE];
-        printf("time: %f, t: %5.3f %5.3f %5.3f q: %4.2f %4.2f %4.2f %4.2f td: %3.1fms\n", header.stamp.toSec(), tmp_T.x(), tmp_T.y(), tmp_T.z(),
-                                                          tmp_Q.w(), tmp_Q.x(), tmp_Q.y(), tmp_Q.z(), estimator.td*1000);
+    ofstream foutC(VINS_RESULT_PATH, ios::app);
+    foutC.setf(ios::fixed, ios::floatfield);
+    foutC.precision(0);
+    foutC << odometry.header.stamp.toSec() * 1e9 << ",";
+    foutC.precision(5);
+    foutC << odometry.pose.pose.position.x << ","
+          << odometry.pose.pose.position.y << ","
+          << odometry.pose.pose.position.z << ","
+          << odometry.pose.pose.orientation.w << ","
+          << odometry.pose.pose.orientation.x << ","
+          << odometry.pose.pose.orientation.y << ","
+          << odometry.pose.pose.orientation.z << ","
+          << odometry.twist.twist.linear.x << ","
+          << odometry.twist.twist.linear.y << ","
+          << odometry.twist.twist.linear.z << "," << endl;
+
+    printf("time: %f, t: %5.3f %5.3f %5.3f q: %4.2f %4.2f %4.2f %4.2f td: %3.1fms\n",
+           odometry.header.stamp.toSec(),
+           odometry.pose.pose.position.x,
+           odometry.pose.pose.position.y,
+           odometry.pose.pose.position.z,
+           odometry.pose.pose.orientation.w,
+           odometry.pose.pose.orientation.x,
+           odometry.pose.pose.orientation.y,
+           odometry.pose.pose.orientation.z,
+           td_ms);
+}
+}
+
+void pubOdometry(const Estimator &estimator, const std_msgs::Header &header)
+{
+    if (estimator.solver_flag == Estimator::SolverFlag::NON_LINEAR)
+    {
+        nav_msgs::Odometry odometry = buildOdometryMessage(estimator, header);
+        publishOdometryMessage(odometry, estimator.td * 1000.0);
 
         fishloop_vins::VIOKeyframe vkf;
         vkf.header = header;
@@ -311,6 +350,91 @@ void pubOdometry(const Estimator &estimator, const std_msgs::Header &header)
     }
     
    
+}
+
+void bufferWarmupOdometry(const Estimator &estimator,
+                          const std_msgs::Header &header)
+{
+    if (estimator.solver_flag != Estimator::SolverFlag::NON_LINEAR)
+        return;
+
+    WarmupOdometryPublication publication;
+    publication.odometry = buildOdometryMessage(estimator, header);
+    publication.td_ms = estimator.td * 1000.0;
+    std::lock_guard<std::mutex> lock(warmup_odometry_mutex);
+    const double stamp = publication.odometry.header.stamp.toSec();
+    if (!warmup_odometry.empty() &&
+        fabs(warmup_odometry.back().odometry.header.stamp.toSec() - stamp) < 1e-6)
+        return;
+    warmup_odometry.push_back(std::move(publication));
+    while (warmup_odometry.size() > kMaxWarmupOdometry)
+        warmup_odometry.pop_front();
+    ROS_INFO_THROTTLE(1.0,
+        "[output_warmup] buffered odometry=%zu %.3f -> %.3f",
+        warmup_odometry.size(),
+        warmup_odometry.front().odometry.header.stamp.toSec(),
+        warmup_odometry.back().odometry.header.stamp.toSec());
+}
+
+double flushWarmupOdometry()
+{
+    std::deque<WarmupOdometryPublication> publications;
+    {
+        std::lock_guard<std::mutex> lock(warmup_odometry_mutex);
+        publications.swap(warmup_odometry);
+    }
+    if (publications.empty())
+        return -1.0;
+
+    std::stable_sort(publications.begin(), publications.end(),
+        [](const WarmupOdometryPublication &a,
+           const WarmupOdometryPublication &b) {
+            return a.odometry.header.stamp < b.odometry.header.stamp;
+        });
+
+    // A metric initialization can make one final gauge/scale adjustment in
+    // the first nonlinear frames without subsequently failing. Retain the
+    // complete stable suffix after the last implausible frame-to-frame jump,
+    // rather than hiding a fixed multi-second prefix.
+    constexpr double kWarmupMaxPoseStep = 0.25;
+    size_t stable_begin = 0;
+    for (size_t i = 1; i < publications.size(); ++i)
+    {
+        const geometry_msgs::Point &a =
+            publications[i - 1].odometry.pose.pose.position;
+        const geometry_msgs::Point &b =
+            publications[i].odometry.pose.pose.position;
+        const double dx = b.x - a.x;
+        const double dy = b.y - a.y;
+        const double dz = b.z - a.z;
+        const double step = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (!std::isfinite(step) || step > kWarmupMaxPoseStep)
+            stable_begin = i;
+    }
+    if (stable_begin > 0)
+    {
+        ROS_WARN("[output_warmup] trimming %zu pose(s) before last startup jump; retained start %.3f",
+            stable_begin,
+            publications[stable_begin].odometry.header.stamp.toSec());
+        publications.erase(publications.begin(),
+            publications.begin() + stable_begin);
+    }
+    ROS_INFO("[output_warmup] publishing %zu buffered odometry poses %.3f -> %.3f",
+        publications.size(),
+        publications.front().odometry.header.stamp.toSec(),
+        publications.back().odometry.header.stamp.toSec());
+    for (const WarmupOdometryPublication &publication : publications)
+        publishOdometryMessage(publication.odometry, publication.td_ms);
+    return publications.front().odometry.header.stamp.toSec();
+}
+
+void clearWarmupOdometry()
+{
+    std::lock_guard<std::mutex> lock(warmup_odometry_mutex);
+    if (!warmup_odometry.empty())
+        ROS_WARN("[output_warmup] discarded %zu buffered odometry poses after reset/anomaly",
+            warmup_odometry.size());
+    warmup_odometry.clear();
 }
 
 void pubKeyPoses(const Estimator &estimator, const std_msgs::Header &header)
@@ -726,7 +850,7 @@ void bufferWarmupKeyframe(const Estimator &estimator)
         warmup_keyframes.back().points.points.size());
 }
 
-void flushWarmupKeyframes()
+void flushWarmupKeyframes(double min_stamp)
 {
     std::deque<KeyframePublication> publications;
     {
@@ -740,6 +864,14 @@ void flushWarmupKeyframes()
         [](const KeyframePublication &a, const KeyframePublication &b) {
             return a.pose.header.stamp < b.pose.header.stamp;
         });
+
+    if (min_stamp >= 0.0)
+        publications.erase(std::remove_if(publications.begin(), publications.end(),
+            [min_stamp](const KeyframePublication &publication) {
+                return publication.pose.header.stamp.toSec() + 1e-6 < min_stamp;
+            }), publications.end());
+    if (publications.empty())
+        return;
 
     ROS_INFO("[loop_warmup] publishing %zu buffered keyframes %.3f -> %.3f",
         publications.size(),
@@ -756,6 +888,17 @@ void clearWarmupKeyframes()
         ROS_WARN("[loop_warmup] discarded %zu buffered keyframes after estimator reset/anomaly",
             warmup_keyframes.size());
     warmup_keyframes.clear();
+}
+
+void resetVioPath()
+{
+    std::lock_guard<std::mutex> lock(vio_path_mutex);
+    path = nav_msgs::Path();
+    pub_path.publish(path);
+    pub_estimator_reset.publish(std_msgs::Empty());
+    sum_of_path = 0.0;
+    last_path.setZero();
+    ROS_INFO("[vio_path] cleared after estimator reset");
 }
 
 void pubKeyframe(const Estimator &estimator)

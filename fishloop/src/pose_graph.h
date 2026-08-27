@@ -61,6 +61,7 @@ public:
 	void savePoseGraph();
 	void loadPoseGraph();
 	void publish();
+	nav_msgs::Path pathSnapshot(int sequence_id);
 	Vector3d t_drift;
 	double yaw_drift;
 	Matrix3d r_drift;
@@ -72,6 +73,7 @@ public:
 private:
 	std::vector<int> detectLoop(KeyFrame* keyframe, int frame_index);
 	std::vector<int> detectLoopMultiView(KeyFrame* keyframe, int frame_index);
+	int rerankCandidateNeighborhood(KeyFrame* keyframe, int seed_index);
 	void addKeyFrameIntoVoc(KeyFrame* keyframe);
 	void optimize4DoF();
 	void optimize6DoF();

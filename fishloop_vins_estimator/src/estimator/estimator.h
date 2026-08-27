@@ -166,7 +166,10 @@ class Estimator
     int low_feature_frame_count = 0;
     int failure_detection_warmup = 0;
     int output_warmup_healthy_frames = 0;
+    double output_warmup_start_time = -1.0;
+    int runtime_reset_count = 0;
     int state_anomaly_frame_count = 0;
+    double measurement_backlog_seconds = 0.0;
 
     vector<Vector3d> point_cloud;
     vector<Vector3d> margin_cloud;

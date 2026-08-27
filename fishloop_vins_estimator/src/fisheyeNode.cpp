@@ -11,7 +11,9 @@ using namespace FeatureTracker;
 namespace
 {
 constexpr size_t MAX_FISHEYE_BUFFER_SIZE = 5;
-constexpr int STEREO_SYNC_QUEUE_SIZE = 800;
+// Keep enough exact-time stereo pairs for short scheduling jitter, but do not
+// retain tens of seconds of compressed images when decoding falls behind IMU.
+constexpr int STEREO_SYNC_QUEUE_SIZE = 60;
 
 template <typename QueueT>
 void popIfNotEmpty(QueueT &queue)
@@ -697,37 +699,71 @@ void VinsNodeBaseClass::processFlattened(const ros::TimerEvent & e) {
     }
 }
 
+bool VinsNodeBaseClass::shouldProcessImage(double stamp)
+{
+    if (!std::isfinite(stamp))
+        return false;
+
+    if (last_accepted_image_time < 0.0 || stamp <= last_accepted_image_time)
+    {
+        last_accepted_image_time = stamp;
+        return true;
+    }
+
+    if (IMAGE_FREQ <= 0.0)
+    {
+        last_accepted_image_time = stamp;
+        return true;
+    }
+
+    // Accept at the configured estimator rate before JPEG decoding and
+    // fisheye remapping. The small tolerance avoids dropping a nominal frame
+    // because of floating-point timestamp jitter.
+    const double min_interval = 0.9 / IMAGE_FREQ;
+    if (stamp - last_accepted_image_time < min_interval)
+        return false;
+
+    last_accepted_image_time = stamp;
+    return true;
+}
+
 void VinsNodeBaseClass::fisheye_imgs_callback(const sensor_msgs::ImageConstPtr &img1_msg, const sensor_msgs::ImageConstPtr &img2_msg) {
     TicToc tic_input;
+    const double stamp = img1_msg->header.stamp.toSec();
+    if (!shouldProcessImage(stamp))
+        return;
     ROS_INFO_THROTTLE(2.0,
         "[VINS-DBG][raw_cb] cam0=%dx%d enc=%s cam1=%dx%d enc=%s t=%.3f",
         img1_msg->width, img1_msg->height, img1_msg->encoding.c_str(),
         img2_msg->width, img2_msg->height, img2_msg->encoding.c_str(),
-        img1_msg->header.stamp.toSec());
+        stamp);
     fisheye_handler->imgs_callback(img1_msg, img2_msg);
 
-    if (img1_msg->header.stamp.toSec() - t_last > 0.11) {
-        ROS_WARN("Duration between two images is %fms", img1_msg->header.stamp.toSec() - t_last);
+    if (t_last > 0.0 && IMAGE_FREQ > 0.0 && stamp - t_last > 1.5 / IMAGE_FREQ) {
+        ROS_WARN("Duration between two accepted images is %.3fms", (stamp - t_last) * 1000.0);
     }
-    t_last = img1_msg->header.stamp.toSec();
+    t_last = stamp;
 }
 
 void VinsNodeBaseClass::fisheye_comp_imgs_callback(const sensor_msgs::CompressedImageConstPtr &img1_msg, const sensor_msgs::CompressedImageConstPtr &img2_msg) {
     TicToc tic_input;
+    const double stamp = img1_msg->header.stamp.toSec();
+    if (!shouldProcessImage(stamp))
+        return;
     auto img1 = getImageFromMsg(img1_msg);
     auto img2 = getImageFromMsg(img2_msg);
     ROS_INFO_THROTTLE(2.0,
         "[VINS-DBG][comp_cb] cam0=%dx%d cam1=%dx%d t=%.3f bytes=(%zu,%zu)",
         img1.cols, img1.rows, img2.cols, img2.rows,
-        img1_msg->header.stamp.toSec(),
+        stamp,
         img1_msg->data.size(), img2_msg->data.size());
 
-    fisheye_handler->imgs_callback(img1_msg->header.stamp.toSec(), img1, img2);
+    fisheye_handler->imgs_callback(stamp, img1, img2);
 
-    if (img1_msg->header.stamp.toSec() - t_last > 0.11) {
-        ROS_WARN("Duration between two images is %fms", img1_msg->header.stamp.toSec() - t_last);
+    if (t_last > 0.0 && IMAGE_FREQ > 0.0 && stamp - t_last > 1.5 / IMAGE_FREQ) {
+        ROS_WARN("Duration between two accepted images is %.3fms", (stamp - t_last) * 1000.0);
     }
-    t_last = img1_msg->header.stamp.toSec();
+    t_last = stamp;
 }
 
 void VinsNodeBaseClass::imgs_callback(const sensor_msgs::ImageConstPtr &img1_msg, const sensor_msgs::ImageConstPtr &img2_msg)

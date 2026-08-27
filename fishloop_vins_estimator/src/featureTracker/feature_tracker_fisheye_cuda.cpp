@@ -146,10 +146,6 @@ FeatureFrame FisheyeFeatureTrackerCuda::trackImage(double _cur_time,
             ids_up_side, track_up_side_cnt, removed_pts, false, predict_up_side);
     }
 
-    if (enable_down_top && !down_top_img.empty()) {
-        cur_down_top_pts = opticalflow_track(down_top_img, prev_down_top_pyr, prev_down_top_pts, 
-            ids_down_top, track_down_top_cnt, removed_pts, false, predict_down_top);
-    }
     set_predict_lock.unlock();
 
     ft_time_sum += t_ft.toc();
@@ -163,9 +159,11 @@ FeatureFrame FisheyeFeatureTrackerCuda::trackImage(double _cur_time,
     if (enable_up_top && !up_top_img.empty()) {
         detectPoints(up_top_img, n_pts_up_top, cur_up_top_pts, TOP_PTS_CNT);
     }
-    if (enable_down_top && !down_top_img.empty()) {
-        detectPoints(down_top_img, n_pts_down_top, cur_down_top_pts, TOP_PTS_CNT);
-    }
+    // The right top image is a stereo observation of the left top features,
+    // not an independent temporal feature stream.  Independent detection here
+    // assigns unrelated IDs and prevents FeatureManager from forming a stereo
+    // pair for triangulation.
+    n_pts_down_top.clear();
 
     if (enable_up_side && !up_side_img.empty()) {
         detectPoints(up_side_img, n_pts_up_side, cur_up_side_pts, SIDE_PTS_CNT);
@@ -180,6 +178,17 @@ FeatureFrame FisheyeFeatureTrackerCuda::trackImage(double _cur_time,
     addPointsFisheye();
 
     TicToc tic2;
+    if (enable_down_top && !down_top_img.empty() && !cur_up_top_pts.empty()) {
+        ids_down_top = ids_up_top;
+        track_down_top_cnt.clear();
+        std::vector<cv::Point2f> down_top_init_pts = cur_up_top_pts;
+        cur_down_top_pts = opticalflow_track(down_top_img, prev_up_top_pyr,
+            down_top_init_pts, ids_down_top, track_down_top_cnt, removed_pts,
+            true, predict_down_top);
+        ROS_INFO_THROTTLE(2.0,
+            "[fisheye_stereo][top] left=%zu right=%zu",
+            cur_up_top_pts.size(), cur_down_top_pts.size());
+    }
     if (enable_down_side && !down_side_img.empty()) {
         ids_down_side = ids_up_side;
         std::vector<cv::Point2f> down_side_init_pts = cur_up_side_pts;
@@ -253,10 +262,10 @@ FeatureFrame FisheyeFeatureTrackerCuda::trackImage(double _cur_time,
     // hasPrediction = false;
     auto ff = setup_feature_frame();
 
-    printf("FT Whole %3.1fms; PTS %ld, STEREO %ld; Detect AVG %3.1fms OpticalFlow %3.1fms concat %3.1fms\n", 
+    printf("FT Whole %3.1fms; PTS %ld, RIGHT_TOP %ld; Detect AVG %3.1fms OpticalFlow %3.1fms concat %3.1fms\n",
         t_r.toc(), 
         cur_up_top_un_pts.size() + cur_up_side_un_pts.size(),
-        cur_down_side_un_pts.size(),
+        cur_down_top_un_pts.size(),
         detected_time_sum/count, 
         ft_time_sum/count,
         concat_cost);

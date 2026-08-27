@@ -51,6 +51,14 @@ void printStatistics(const Estimator &estimator, double t);
 
 void pubOdometry(const Estimator &estimator, const std_msgs::Header &header);
 
+// Hold the early nonlinear trajectory until the current initialization has
+// survived the stability gate. A failed attempt discards these poses; a
+// healthy attempt publishes them in timestamp order so the visible trajectory
+// does not lose its beginning.
+void bufferWarmupOdometry(const Estimator &estimator, const std_msgs::Header &header);
+double flushWarmupOdometry();
+void clearWarmupOdometry();
+
 void pubKeyPoses(const Estimator &estimator, const std_msgs::Header &header);
 
 void pubCameraPose(const Estimator &estimator, const std_msgs::Header &header);
@@ -64,5 +72,9 @@ void pubKeyframe(const Estimator &estimator);
 // Preserve the first valid loop-closure keyframes while estimator trajectory
 // publication is held back by the post-initialization stability warmup.
 void bufferWarmupKeyframe(const Estimator &estimator);
-void flushWarmupKeyframes();
+void flushWarmupKeyframes(double min_stamp = -1.0);
 void clearWarmupKeyframes();
+
+// Clear the published VIO path whenever the solver establishes a new local
+// world frame, preventing RViz from joining unrelated pre/post-reset poses.
+void resetVioPath();

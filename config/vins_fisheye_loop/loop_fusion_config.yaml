@@ -1,14 +1,20 @@
 %YAML:1.0
 ---
 #==========================================================
+
+# 默认遵循原版 VINS-Fusion 的回环主流程：每个关键帧作为一个 DBoW 文档，
+# 查询后只选择一个历史候选，使用“当前窗口 BRIEF -> 历史整帧稠密 BRIEF”
+# 建立 3D-2D 对应，再进入几何验证和原版 pose graph 优化。鱼眼扩展仅负责
+# 双相机 EUCM 规范视图、bearing 和相机外参。
+loop_preserve_original_flow: 1
 # VINS-Fisheye 的 loop_fusion / 位姿图回环配置。
 #
-# 本 fisheye fork 的回环链路：
-#   1. 订阅 VINS 重发布的左右原始鱼眼图像；
-#   2. 为 EUCM 相机生成规范视图并提取 FAST + BRIEF；
-#   3. 十个规范视图分别作为 DBoW 文档，跨视图聚合候选并做连续帧投票；
-#   4. VIO 3D 点按 bearing 精确投到规范视图像素，原位计算 ORB；
-#   5. cam0/cam1 分别用 EUCM bearing 做 PnP，并检查两组 body pose 一致性。
+# 默认链路对应原版 VINS-Fusion：
+#   1. 双鱼眼图像展开为规范透视视图并提取稠密 FAST + BRIEF；
+#   2. 每个关键帧的全部规范视图合并为一个 DBoW 文档；
+#   3. DBoW 只返回一个历史关键帧进入几何验证；
+#   4. 当前 VIO 窗口 BRIEF 匹配历史关键帧的稠密 BRIEF；
+#   5. cam0/cam1 分别以 EUCM bearing 做 PnP，随后进入原版 pose graph。
 #
 # 因此不再依赖 cam0_pinhole_undist_full.yaml，也不订阅
 # /vins_estimator/keyframe_image。
@@ -39,16 +45,15 @@ image_height: 1200
 # 每台鱼眼生成 5 个规范针孔视图，两台相机共十个视图。
 loop_view_size: 320
 loop_view_fov_deg: 100.0
-loop_view_features: 300
+loop_view_features: 100
 
 # 下列规范视图参数在 loop_retrieval_use_vio_features=0 时生效。
 # view 0 是与 cam0 光轴一致的 identity/front 视图。
 loop_retrieval_camera_count: 2
 loop_retrieval_view_count: 5
 
-# DBoW 使用规范视图上的密集 FAST+BRIEF。VIO window 只有约 100--150 个
-# 稀疏点，实测首尾真候选经常无法进入 top-K；几何验证仍由下面的 ORB+PnP
-# 独立完成，不会把密集检索点误当作 3D 对应点。
+# 与原版整图 BRIEF 对应：DBoW 使用规范视图上的稠密 FAST+BRIEF。
+# 几何查询端仍然使用带 3D 点的当前 VIO window BRIEF。
 loop_retrieval_use_vio_features: 0
 
 # OpenCV central PnP 使用 x/z,y/z；EUCM 提升后 z 太小或为负的边缘 bearing
@@ -69,6 +74,10 @@ pose_graph_save_path: "/root/catkin_ws/src/fishloop_vins/data/pose_graph/"
 # 0 = 每次从空图开始；1 = 启动时加载 pose_graph_save_path 下的历史图。
 load_previous_pose_graph: 0
 
+# 使用原版已经提供的 SKIP_CNT 机制降低双鱼眼规范视图的计算频率。
+# 1 表示隔帧建立 pose-graph keyframe，不改变 DBoW/几何/优化流程。
+loop_keyframe_skip: 1
+
 #========================
 # 回环候选检索参数：DBoW 层
 #========================
@@ -78,14 +87,20 @@ load_previous_pose_graph: 0
 loop_fast_threshold: 20
 
 # DBoW 每次查询返回的候选数量上限。
-# 数值越大，进入后续 ORB/PnP 检查的候选更多，但计算量增加。
-loop_dbow_max_results: 12
+# 双相机 EUCM-PnP 是这里的主要耗时；限制到前 2 名，避免回环线程长期
+# 落后于 VIO，并让原始图像在完成关键帧同步前被队列淘汰。
+loop_dbow_max_results: 4
+
+# 实验性邻域重排；原版兼容模式下不启用。
+loop_candidate_neighbor_window: 0
+loop_candidate_neighbor_stride: 10
 
 # DBoW 查询时跳过最近多少个 keyframe。
 # 只查询 index < 当前 index - loop_min_query_gap 的旧关键帧。
 # 如果回环发生得很快，可以减小；如果容易把近邻当回环，可以增大。
-# 本数据约 15 Hz；120 帧约等于 8 秒，可排除刚经过位置的局部近邻。
-loop_min_query_gap: 120
+# loop_keyframe_skip=3 后图关键帧约 2.5 Hz；60 帧仍对应约 24 秒，保持与
+# 原 skip=1/query_gap=120 基本相同的时间排除范围。
+loop_min_query_gap: 60
 
 # 最早从第几个 keyframe 开始允许检测回环。
 # 用于避免刚启动、关键帧太少时产生无意义候选。
@@ -134,25 +149,24 @@ loop_brief_dist_threshold: 80
 # 不建议超过 0.90。
 loop_brief_ratio_threshold: 0.80
 
-# 使用旋转不变 ORB 做几何匹配：每个 VIO 点按 bearing 精确投影到其规范
-# 视图像素，并在该位置计算带方向 ORB，描述子始终直接绑定原 3D 点。
-loop_orb_geometry: 1
+# 实验性 ORB 几何路径；默认关闭，使用原版 BRIEF 匹配思路。
+loop_orb_geometry: 0
 # 在 OpenCV CUDA cudafeatures2d 可用时，将 ORB 双向 Hamming KNN 匹配放到 GPU；
 # 无 CUDA 模块、无设备或运行异常时自动回退 CPU BFMatcher。
 loop_use_gpu: 1
 loop_orb_features: 2500
 loop_orb_fast_threshold: 12
-loop_orb_dist_threshold: 64
-loop_orb_ratio_threshold: 0.85
+loop_orb_dist_threshold: 72
+loop_orb_ratio_threshold: 0.90
 # 普通回环几何使用当前帧精确绑定3D的 VIO ORB，匹配旧关键帧在2×5个
 # 规范透视视图中均匀提取的 dense ORB。旧 dense 点只提供精确 EUCM bearing，
 # 不再把当前 dense 点按像素近邻绑定到 VIO 3D。
 loop_orb_exact_dense_dist_threshold: 72
 loop_orb_exact_dense_ratio_threshold: 0.90
-loop_orb_exact_dense_min_pnp_inliers: 14
+loop_orb_exact_dense_min_pnp_inliers: 12
 # 强制验证的早期关键帧同样使用 exact-current→dense-canonical-old，但允许
 # 使用单独的宽松描述子阈值和后续大 yaw 门限。
-loop_orb_dense_dist_threshold: 72
+loop_orb_dense_dist_threshold: 50
 loop_orb_dense_ratio_threshold: 0.90
 # 以下两个参数仅为旧 dense↔dense 分支的配置兼容项；新的 exact→dense
 # 路径不做跨规范视图的单一 homography，因为多个透视平面不存在统一单应。
@@ -161,40 +175,53 @@ loop_orb_dense_homography_threshold: 5.0
 # 强制早期候选仍必须通过 PnP RANSAC，因此可使用独立的最终内点门槛。
 loop_orb_dense_min_pnp_inliers: 10
 # 第二组 bag 首尾朝向相差约 103 度；只有显式强制的早期诊断候选允许
-# 大角度回环，普通 DBoW 候选仍使用下方 30 度限制。
+# 大角度回环，普通 DBoW 候选仍使用下方 45 度限制。
 loop_orb_dense_max_yaw_deg: 150.0
 # 旧配置兼容项；exact-current→dense-old 不再使用像素近邻关联。
 loop_orb_association_radius: 10.0
 
-# 每台相机达到 6 个内点即可作为双相机约束的“贡献者”；双相机仍需总内点
-# 达到上面的 14，并通过位姿一致性检查。这样 8+6 不会因先丢掉 6 而误拒绝。
-loop_per_camera_min_inliers: 6
+# 每台相机达到 5 个内点即可作为双相机约束的“贡献者”；双相机仍需总内点
+# 达到上面的 12，并通过位姿一致性检查。
+loop_per_camera_min_inliers: 10
 # 若只有一台相机能稳定求解，则采用更强的绝对内点数和内点率门槛，避免
 # 为提高召回率而直接允许任意 6~8 内点的单相机假回环。
-loop_single_camera_min_inliers: 12
-loop_single_camera_min_inlier_ratio: 0.65
-loop_camera_consistency_rotation_deg: 15.0
-loop_camera_consistency_translation: 1.0
+loop_single_camera_min_inliers: 10
+loop_single_camera_min_inlier_ratio: 0.40
+# 鱼眼规范视图边缘的 bearing 对标定误差更敏感，允许两台相机的独立 PnP
+# 结果存在小幅差异；数量级明显错误的解仍会被一致性门限拒绝。
+loop_camera_consistency_rotation_deg: 20.0
+loop_camera_consistency_translation: 1.5
+
+# 描述子互检之后、PnP 之前，分别在 cam0 和 cam1 内用归一化 bearing
+# 估计 Essential Matrix。只过滤同一相机跨帧不满足极线约束的对应，绝不把
+# 两台相机的点混进同一个模型。少于 16 对时不执行该预过滤，直接交给 PnP
+# RANSAC；五点法在 8--15 个随机匹配上几乎总能拟合出 6--9 个“内点”，既慢
+# 又没有提供有效筛选。
+# 像素门限同样按 canonical-view 焦距换算到归一化坐标。
+loop_epipolar_min_matches: 16
+loop_epipolar_reprojection_error_px: 2.0
+loop_epipolar_confidence: 0.99
 
 # PnP 不使用当前漂移 VIO 位姿作为初值，而由 EPNP RANSAC 独立求解，
 # 再对内点做 iterative refinement。像素门限按 canonical-view 焦距换算，
 # 不能用原始 EUCM fx，否则本配置下门限会被错误压紧约 4.6 倍。
-loop_pnp_ransac_iterations: 300
+loop_pnp_ransac_iterations: 200
 loop_pnp_reprojection_error_px: 10.0
-loop_pnp_confidence: 0.999
+loop_pnp_confidence: 0.99
 
-# BRIEF / exact-to-exact 回退路径的内点阈值，和桌面版 loop_fusion111
-# 的 LOOP_MIN_LOOP_NUM 对齐。普通 exact-to-dense 路径使用上方独立的14内点门槛。
-loop_min_inliers: 30
+# BRIEF 兼容路径使用代码中的“LOOP_MIN_LOOP_NUM + 1”判定，因此这里设为
+# 11 对应双相机总内点至少 12。仍要求每台有效相机至少 5 个 PnP 内点，并
+# 保留双相机位姿一致性检查，避免仅凭宽松描述子匹配接受假回环。
+loop_min_inliers: 13
 
 # PnP 得到的相对 yaw 最大允许值，单位度。
 # 超过该值即使几何匹配足够也会拒绝，防止姿态不合理的回环。
-loop_max_yaw_deg: 30.0
+loop_max_yaw_deg: 20.0
 
-# PnP 得到的相对平移最大允许值，单位米。
-# 真回环在本数据中的估计大多小于 1.5 m；初测出现 6~17 m 的可疑约束，
-# 因此使用 3 m 的保守上限。场景尺度明显更大时再有依据地放宽。
-loop_max_translation: 3.0
+# PnP 得到的相对平移可选安全门，单位米；小于等于 0 表示禁用。
+# 双相机分别求解、总内点数、单相机内点率和双相机位姿一致性已经负责
+# 几何验证，因此不再用固定距离拒绝大场景中的有效回环边。
+loop_max_translation: 0.0
 
 #========================
 # 调试图像与可视化

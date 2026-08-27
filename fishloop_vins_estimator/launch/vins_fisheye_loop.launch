@@ -1,7 +1,9 @@
 <launch>
     <arg name="config_file" default="$(find fishloop_vins)/../config/vins_fisheye_loop/stereo_imu_config.yaml" />
     <arg name="viz"         default="true" />
-    <arg name="tracking_viz" default="true" />
+    <!-- The standalone OpenCV/GTK viewer decodes both compressed streams a
+         second time and can fail under Docker X11 MIT-SHM. Keep it opt-in. -->
+    <arg name="tracking_viz" default="false" />
     <!-- Physical input topics used by stereo_imu_config.yaml and the
          cam1/cam2 compressed-image bags. -->
     <arg name="input_left_topic"  default="/cam1/image/compressed" />

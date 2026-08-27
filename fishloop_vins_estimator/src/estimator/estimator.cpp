@@ -99,7 +99,9 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1)
 
 
 bool Estimator::is_next_odometry_frame() {
-    return (inputImageCnt % 2 == 1);
+    // Fisheye input is rate-limited before decoding according to IMAGE_FREQ,
+    // so every retained frame is an estimator/odometry frame.
+    return true;
 }
 
 
@@ -115,17 +117,14 @@ void Estimator::inputFisheyeImage(double t, const CvImages & fisheye_imgs_up,
 
     featureFrame = featureTracker->trackImage(t, fisheye_imgs_up, fisheye_imgs_down);
 
-    if(inputImageCnt % 2 == 0)
-    {
-        mBuf.lock();
-        featureBuf.push(make_pair(t, featureFrame));
-        if (FISHEYE && ENABLE_DEPTH) {
-            fisheye_imgs_upBuf.push(fisheye_imgs_up);
-            fisheye_imgs_downBuf.push(fisheye_imgs_down);
-            fisheye_imgs_stampBuf.push(t);
-        }
-        mBuf.unlock();
+    mBuf.lock();
+    featureBuf.push(make_pair(t, featureFrame));
+    if (FISHEYE && ENABLE_DEPTH) {
+        fisheye_imgs_upBuf.push(fisheye_imgs_up);
+        fisheye_imgs_downBuf.push(fisheye_imgs_down);
+        fisheye_imgs_stampBuf.push(t);
     }
+    mBuf.unlock();
 
     double dt = featureTrackerTime.toc();
 
@@ -189,17 +188,14 @@ void Estimator::inputFisheyeImage(double t, const CvCudaImages & fisheye_imgs_up
         featureFrame = featureTracker->trackImage(t, fisheye_imgs_up_cuda, fisheye_imgs_down_cuda);
     }
 
-    if(inputImageCnt % 2 == 0)
-    {
-        mBuf.lock();
-        featureBuf.push(make_pair(t, featureFrame));
-        if (FISHEYE && ENABLE_DEPTH) {
-            fisheye_imgs_upBuf_cuda.push(fisheye_imgs_up_cuda);
-            fisheye_imgs_downBuf_cuda.push(fisheye_imgs_down_cuda);
-            fisheye_imgs_stampBuf.push(t);
-        }
-        mBuf.unlock();
+    mBuf.lock();
+    featureBuf.push(make_pair(t, featureFrame));
+    if (FISHEYE && ENABLE_DEPTH) {
+        fisheye_imgs_upBuf_cuda.push(fisheye_imgs_up_cuda);
+        fisheye_imgs_downBuf_cuda.push(fisheye_imgs_down_cuda);
+        fisheye_imgs_stampBuf.push(t);
     }
+    mBuf.unlock();
 
     double dt = featureTrackerTime.toc();
 
@@ -467,6 +463,10 @@ void Estimator::processMeasurements()
                 break;
             bool imu_interval_ok = true;
             mBuf.lock();
+            measurement_backlog_seconds =
+                (USE_IMU && !accBuf.empty())
+                    ? std::max(0.0, accBuf.back().first - curTime)
+                    : 0.0;
             if(USE_IMU) {
                 if (prevTime < 0.0 && !accBuf.empty())
                     prevTime = accBuf.front().first;
@@ -528,39 +528,60 @@ void Estimator::processMeasurements()
             // initial IMU bias is implausible). Publishing those transient
             // poses creates a discontinuity in vio.csv and also inserts the
             // failed local frame into loop_fusion before the estimator resets.
-            // Require a longer stable publishing warmup than the 15-frame
-            // failure-detection grace period, and suppress any frame currently
-            // carrying an anomaly streak.
-            constexpr int kOutputWarmupFrames = 30;
+            // This dataset contains failed initializations which remain
+            // numerically plausible for more than ten seconds under full
+            // loop-fusion load. Use elapsed
+            // sensor time rather than a frame count so the safety interval is
+            // independent of the configured image rate.
+            constexpr double kInitialOutputWarmupSeconds = 12.0;
+            constexpr double kPostResetOutputWarmupSeconds = 4.0;
+            const double required_output_warmup_seconds =
+                runtime_reset_count > 0
+                    ? kPostResetOutputWarmupSeconds
+                    : kInitialOutputWarmupSeconds;
             const bool nonlinear_healthy =
                 solver_flag == NON_LINEAR && state_anomaly_frame_count == 0;
-            if (output_warmup_healthy_frames < kOutputWarmupFrames)
+            if (nonlinear_healthy)
             {
-                if (nonlinear_healthy)
-                    ++output_warmup_healthy_frames;
-                else
+                if (output_warmup_start_time < 0.0 ||
+                    feature.first < output_warmup_start_time)
+                {
+                    output_warmup_start_time = feature.first;
                     output_warmup_healthy_frames = 0;
+                }
+                ++output_warmup_healthy_frames;
             }
+            else
+            {
+                output_warmup_start_time = -1.0;
+                output_warmup_healthy_frames = 0;
+            }
+            const double output_warmup_seconds =
+                output_warmup_start_time >= 0.0
+                    ? feature.first - output_warmup_start_time : 0.0;
             const bool output_ready =
                 nonlinear_healthy &&
-                output_warmup_healthy_frames >= kOutputWarmupFrames;
+                output_warmup_seconds >= required_output_warmup_seconds;
             if (nonlinear_healthy && !output_ready)
             {
-                // Keep the first valid keyframes available for loop closure.
-                // Publishing them immediately would contaminate loop_fusion if
-                // this nonlinear initialization is rejected a few frames later,
-                // so hold complete message snapshots until the warmup succeeds.
+                bufferWarmupOdometry(*this, header);
                 bufferWarmupKeyframe(*this);
             }
             else if (!nonlinear_healthy)
             {
+                clearWarmupOdometry();
                 clearWarmupKeyframes();
             }
             if (output_ready)
             {
-                // Preserve timestamp order: buffered startup keyframes must
-                // reach loop_fusion before the current live keyframe.
-                flushWarmupKeyframes();
+                ROS_INFO_ONCE("[output_warmup] ready after %.2fs (%d healthy frames, resets=%d, required=%.2fs)",
+                    output_warmup_seconds, output_warmup_healthy_frames,
+                    runtime_reset_count, required_output_warmup_seconds);
+                // Publish the validated attempt's early trajectory before the
+                // current frame. Failed attempts never reach this branch and
+                // are discarded by reset/anomaly handling above.
+                const double validated_output_start = flushWarmupOdometry();
+                flushWarmupKeyframes(validated_output_start);
                 pubIMUBias(latest_Ba, latest_Bg, header);
                 //These cost 5ms, ~1/6 percent on manifold2
                 pubOdometry(*this, header);
@@ -669,7 +690,9 @@ void Estimator::clearState()
     low_feature_frame_count = 0;
     failure_detection_warmup = 0;
     output_warmup_healthy_frames = 0;
+    output_warmup_start_time = -1.0;
     state_anomaly_frame_count = 0;
+    measurement_backlog_seconds = 0.0;
     last_R.setIdentity();
     last_R0.setIdentity();
     last_P.setZero();
@@ -694,6 +717,7 @@ void Estimator::resetRuntimeState()
         while (!fisheye_imgs_upBuf.empty()) fisheye_imgs_upBuf.pop();
         while (!fisheye_imgs_downBuf.empty()) fisheye_imgs_downBuf.pop();
 
+        ++runtime_reset_count;
         clearState();
         prevTime = -1.0;
         curTime = -1.0;
@@ -718,6 +742,12 @@ void Estimator::resetRuntimeState()
         std::lock_guard<std::mutex> lock(kf_img_mutex);
         kf_img_buf.clear();
     }
+    // A solver reboot establishes a new local world frame. Remove any path
+    // already published in the previous frame so RViz cannot connect the two
+    // unrelated trajectories with a long artificial segment.
+    clearWarmupOdometry();
+    clearWarmupKeyframes();
+    resetVioPath();
 }
 
 void Estimator::processIMU(double t, double dt, const Vector3d &linear_acceleration, const Vector3d &angular_velocity)
@@ -918,7 +948,19 @@ void Estimator::processImage(const FeatureFrame &image, const double header)
         }
         
         f_manager.removeOutlier(removeIndex);
-        predictPtsInNextFrame();
+        const double prediction_lag_limit =
+            IMAGE_FREQ > 0.0 ? std::max(0.1, 2.0 / IMAGE_FREQ) : 0.1;
+        if (measurement_backlog_seconds <= prediction_lag_limit)
+        {
+            predictPtsInNextFrame();
+        }
+        else
+        {
+            featureTracker->setPrediction({}, {});
+            ROS_WARN_THROTTLE(1.0,
+                "[feature_prediction] disabled stale prediction at %.1fms sensor backlog",
+                measurement_backlog_seconds * 1000.0);
+        }
         
         if(ENABLE_PERF_OUTPUT) {
             ROS_INFO("solver costs: %fms", t_solve.toc());

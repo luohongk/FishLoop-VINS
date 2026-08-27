@@ -48,6 +48,7 @@ extern int DEBUG_IMAGE;
 // that stock VINS-Fusion assumed for its 460-focal cameras.
 extern double LOOP_FOCAL_LENGTH;
 // Loop-closure tuning knobs (set from the config / defaults in pose_graph_node).
+extern int LOOP_PRESERVE_ORIGINAL_FLOW; // stock VINS-Fusion retrieval/verification flow
 extern int LOOP_MIN_LOOP_NUM;      // min PnP inliers to accept a loop
 extern int LOOP_FAST_TH;           // FAST corner threshold for old-frame BRIEF
 extern int LOOP_BRIEF_DIST_TH;     // max Hamming distance for a descriptor match
@@ -55,10 +56,12 @@ extern double LOOP_BRIEF_RATIO_TH; // max best/second-best Hamming ratio
 extern int LOOP_MIN_QUERY_GAP;     // only query keyframes older than this gap
 extern int LOOP_MIN_DETECT_INDEX;  // do not detect loops before this keyframe
 extern int LOOP_DBOW_MAX_RESULTS;  // number of DBoW candidates to retrieve
+extern int LOOP_CANDIDATE_NEIGHBOR_WINDOW; // frames around top DBoW hit to rerank
+extern int LOOP_CANDIDATE_NEIGHBOR_STRIDE; // sampling stride inside rerank window
 extern double LOOP_DBOW_MIN_NEIGHBOR_SCORE;   // min best DBoW score to search
 extern double LOOP_DBOW_MIN_CANDIDATE_SCORE;  // min selected candidate score
 extern double LOOP_MAX_YAW_DEG;           // max relative yaw accepted
-extern double LOOP_MAX_TRANSLATION;       // max relative translation accepted
+extern double LOOP_MAX_TRANSLATION;       // max relative translation; <= 0 disables the gate
 extern int LOOP_VIEW_FEATURES;            // descriptor cap per camera/view
 extern double LOOP_EUCM_MIN_Z;            // min bearing z accepted by central PnP
 extern int LOOP_RETRIEVAL_CAMERA_COUNT;   // cameras used by DBoW retrieval
@@ -90,6 +93,9 @@ extern int LOOP_SINGLE_CAMERA_MIN_INLIERS;  // stronger absolute gate when only 
 extern double LOOP_SINGLE_CAMERA_MIN_INLIER_RATIO;
 extern double LOOP_CAMERA_CONSISTENCY_ROTATION_DEG;
 extern double LOOP_CAMERA_CONSISTENCY_TRANSLATION;
+extern int LOOP_EPIPOLAR_MIN_MATCHES;       // minimum same-camera matches before Essential RANSAC
+extern double LOOP_EPIPOLAR_REPROJECTION_ERROR_PX; // canonical-view px, converted by LOOP_VIEW_FOCAL
+extern double LOOP_EPIPOLAR_CONFIDENCE;
 extern int LOOP_PNP_RANSAC_ITERATIONS;      // hypotheses tested by PnP RANSAC
 extern double LOOP_PNP_REPROJECTION_ERROR_PX; // canonical-view px, converted by LOOP_VIEW_FOCAL
 extern double LOOP_PNP_CONFIDENCE;

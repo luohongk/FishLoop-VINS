@@ -88,7 +88,8 @@ public:
 	KeyFrame(double _time_stamp, int _index, Vector3d &_vio_T_w_i, Matrix3d &_vio_R_w_i, Vector3d &_T_w_i, Matrix3d &_R_w_i,
 			 cv::Mat &_image, int _loop_index, Eigen::Matrix<double, 8, 1 > &_loop_info,
 			 vector<cv::KeyPoint> &_keypoints, vector<cv::KeyPoint> &_keypoints_norm, vector<BRIEF::bitset> &_brief_descriptors);
-	bool findConnection(KeyFrame* old_kf);
+	bool findConnection(KeyFrame* old_kf, bool allow_dense_fallback = true);
+	bool findConnectionWithORBSource(KeyFrame* old_kf, bool dense_old);
 	void computeWindowBRIEFPoint();
 	void computeBRIEFPoint();
 	void computeRetrievalBRIEFPoint();
@@ -117,9 +118,9 @@ public:
 								 bool dense_old,
 								 int distance_threshold,
 								 double ratio_threshold) const;
-	void FundmantalMatrixRANSAC(const std::vector<cv::Point2f> &matched_2d_cur_norm,
-                                const std::vector<cv::Point2f> &matched_2d_old_norm,
-                                vector<uchar> &status);
+	bool EpipolarRANSAC(const std::vector<cv::Point2f> &matched_2d_cur_norm,
+						 const std::vector<cv::Point2f> &matched_2d_old_norm,
+						 vector<uchar> &status) const;
 	bool PnPRANSAC(const vector<cv::Point2f> &matched_2d_old_norm,
 	               const std::vector<cv::Point3f> &matched_3d,
 	               std::vector<uchar> &status,
@@ -163,6 +164,7 @@ public:
 	vector<cv::KeyPoint> keypoints;
 	vector<cv::KeyPoint> keypoints_norm;
 	vector<cv::KeyPoint> window_keypoints;
+	vector<int> brief_keypoint_camera_ids;
 	vector<cv::KeyPoint> window_keypoints_norm;
 	vector<BRIEF::bitset> brief_descriptors;
 	vector<vector<cv::KeyPoint>> camera_keypoints;

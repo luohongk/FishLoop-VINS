@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <deque>
 #include <vector>
 #include <ros/ros.h>
 #include <nav_msgs/Odometry.h>
@@ -20,6 +21,7 @@
 #include <sensor_msgs/image_encodings.h>
 #include <visualization_msgs/Marker.h>
 #include <std_msgs/Bool.h>
+#include <std_msgs/Empty.h>
 #include <cv_bridge/cv_bridge.h>
 #include <fishloop_vins/VIOKeyframe.h>
 #include <fstream>
@@ -41,6 +43,13 @@ using namespace std;
 queue<sensor_msgs::ImageConstPtr> image0_buf;
 queue<sensor_msgs::ImageConstPtr> image1_buf;
 queue<fishloop_vins::VIOKeyframeConstPtr> keyframe_buf;
+struct SynchronizedKeyframe
+{
+    sensor_msgs::ImageConstPtr image0;
+    sensor_msgs::ImageConstPtr image1;
+    fishloop_vins::VIOKeyframeConstPtr keyframe;
+};
+queue<SynchronizedKeyframe> synchronized_keyframe_buf;
 queue<Eigen::Vector3d> odometry_buf;
 std::mutex m_buf;
 std::mutex m_process;
@@ -61,6 +70,7 @@ int COL;
 int DEBUG_IMAGE;
 
 double LOOP_FOCAL_LENGTH = 460.0;
+int LOOP_PRESERVE_ORIGINAL_FLOW = 1;
 int LOOP_MIN_LOOP_NUM = 25;
 int LOOP_FAST_TH = 20;
 int LOOP_BRIEF_DIST_TH = 80;
@@ -69,6 +79,8 @@ int LOOP_MIN_QUERY_GAP = 50;
 int LOOP_MIN_DETECT_INDEX = 50;
 int LOOP_SKIP_FIRST_KEYFRAMES = 0;
 int LOOP_DBOW_MAX_RESULTS = 4;
+int LOOP_CANDIDATE_NEIGHBOR_WINDOW = 0;
+int LOOP_CANDIDATE_NEIGHBOR_STRIDE = 5;
 double LOOP_DBOW_MIN_NEIGHBOR_SCORE = 0.05;
 double LOOP_DBOW_MIN_CANDIDATE_SCORE = 0.015;
 double LOOP_MAX_YAW_DEG = 30.0;
@@ -104,6 +116,9 @@ int LOOP_SINGLE_CAMERA_MIN_INLIERS = 12;
 double LOOP_SINGLE_CAMERA_MIN_INLIER_RATIO = 0.65;
 double LOOP_CAMERA_CONSISTENCY_ROTATION_DEG = 15.0;
 double LOOP_CAMERA_CONSISTENCY_TRANSLATION = 1.0;
+int LOOP_EPIPOLAR_MIN_MATCHES = 8;
+double LOOP_EPIPOLAR_REPROJECTION_ERROR_PX = 3.0;
+double LOOP_EPIPOLAR_CONFIDENCE = 0.999;
 int LOOP_PNP_RANSAC_ITERATIONS = 300;
 double LOOP_PNP_REPROJECTION_ERROR_PX = 10.0;
 double LOOP_PNP_CONFIDENCE = 0.999;
@@ -121,6 +136,12 @@ double LOOP_VIEW_FOCAL = 160.0;
 ros::Publisher pub_match_img;
 ros::Publisher pub_camera_pose_visual;
 ros::Publisher pub_odometry_rect;
+ros::Publisher pub_pose_graph_path_live;
+
+std::deque<geometry_msgs::PoseStamped> live_vio_tail;
+nav_msgs::Path latest_vio_path;
+std::mutex m_live_vio_tail;
+static const size_t MAX_LIVE_VIO_TAIL_SIZE = 2000;
 
 std::string BRIEF_PATTERN_FILE;
 std::string POSE_GRAPH_SAVE_PATH;
@@ -129,8 +150,13 @@ CameraPoseVisualization cameraposevisual(1, 0, 0, 1);
 Eigen::Vector3d last_t(-100, -100, -100);
 double last_image_time = -1;
 
-static const size_t MAX_IMAGE_BUFFER_SIZE = 30;
-static const size_t MAX_KEYFRAME_BUFFER_SIZE = 100;
+// Retain enough stereo frames to absorb short processing bursts without
+// discarding keyframes from the stable published trajectory.
+// Cover the estimator's longest (12 s) validation interval with margin at
+// 15 Hz, allowing delayed validated keyframes to find their original images.
+static const size_t MAX_IMAGE_BUFFER_SIZE = 240;
+static const size_t MAX_KEYFRAME_BUFFER_SIZE = 200;
+static const size_t MAX_SYNCHRONIZED_KEYFRAME_BUFFER_SIZE = 300;
 
 ros::Publisher pub_point_cloud, pub_margin_cloud;
 
@@ -148,6 +174,7 @@ void new_sequence()
     posegraph.posegraph_visualization->reset();
     posegraph.publish();
     skip_first_cnt = 0;
+    skip_cnt = 0;
     m_buf.lock();
     while(!image0_buf.empty())
         image0_buf.pop();
@@ -155,9 +182,30 @@ void new_sequence()
         image1_buf.pop();
     while(!keyframe_buf.empty())
         keyframe_buf.pop();
+    while(!synchronized_keyframe_buf.empty())
+        synchronized_keyframe_buf.pop();
     while(!odometry_buf.empty())
         odometry_buf.pop();
     m_buf.unlock();
+    {
+        std::lock_guard<std::mutex> lock(m_live_vio_tail);
+        live_vio_tail.clear();
+        latest_vio_path.poses.clear();
+    }
+}
+
+void estimator_reset_callback(const std_msgs::EmptyConstPtr &)
+{
+    ROS_WARN("estimator reset received; starting a new loop-fusion sequence");
+    std::lock_guard<std::mutex> process_lock(m_process);
+    new_sequence();
+
+    // RViz subscribes to the live path rather than PoseGraph::publish(). Clear
+    // it immediately while the estimator establishes its new local frame.
+    nav_msgs::Path empty_path;
+    empty_path.header.frame_id = "world";
+    empty_path.header.stamp = ros::Time::now();
+    pub_pose_graph_path_live.publish(empty_path);
 }
 
 void image0_callback(const sensor_msgs::ImageConstPtr &image_msg)
@@ -241,21 +289,59 @@ void keyframe_callback(const fishloop_vins::VIOKeyframeConstPtr &keyframe_msg)
 		keyframe_buf.pop();
 }
 
+void vio_path_callback(const nav_msgs::Path::ConstPtr &path_msg)
+{
+    std::lock_guard<std::mutex> lock(m_live_vio_tail);
+    latest_vio_path = *path_msg;
+}
+
 void vio_callback(const nav_msgs::Odometry::ConstPtr &pose_msg)
 {
     //ROS_INFO("vio_callback!");
-    Vector3d vio_t(pose_msg->pose.pose.position.x, pose_msg->pose.pose.position.y, pose_msg->pose.pose.position.z);
-    Quaterniond vio_q;
-    vio_q.w() = pose_msg->pose.pose.orientation.w;
-    vio_q.x() = pose_msg->pose.pose.orientation.x;
-    vio_q.y() = pose_msg->pose.pose.orientation.y;
-    vio_q.z() = pose_msg->pose.pose.orientation.z;
+    geometry_msgs::PoseStamped raw_pose;
+    raw_pose.header = pose_msg->header;
+    raw_pose.header.frame_id = "world";
+    raw_pose.pose = pose_msg->pose.pose;
 
-    vio_t = posegraph.w_r_vio * vio_t + posegraph.w_t_vio;
-    vio_q = posegraph.w_r_vio *  vio_q;
+    // Use one transform snapshot for the corrected odometry and the complete
+    // live tail, avoiding a mixed path if graph optimization updates drift
+    // during this callback.
+    const Matrix3d w_r_vio = posegraph.w_r_vio;
+    const Vector3d w_t_vio = posegraph.w_t_vio;
+    const Matrix3d r_drift = posegraph.r_drift;
+    const Vector3d t_drift = posegraph.t_drift;
+    auto correct_pose = [&](const geometry_msgs::PoseStamped &input) {
+        geometry_msgs::PoseStamped output = input;
+        Vector3d position(input.pose.position.x,
+                          input.pose.position.y,
+                          input.pose.position.z);
+        Quaterniond orientation(input.pose.orientation.w,
+                                input.pose.orientation.x,
+                                input.pose.orientation.y,
+                                input.pose.orientation.z);
+        position = w_r_vio * position + w_t_vio;
+        orientation = w_r_vio * orientation;
+        position = r_drift * position + t_drift;
+        orientation = r_drift * orientation;
+        orientation.normalize();
+        output.pose.position.x = position.x();
+        output.pose.position.y = position.y();
+        output.pose.position.z = position.z();
+        output.pose.orientation.x = orientation.x();
+        output.pose.orientation.y = orientation.y();
+        output.pose.orientation.z = orientation.z();
+        output.pose.orientation.w = orientation.w();
+        return output;
+    };
 
-    vio_t = posegraph.r_drift * vio_t + posegraph.t_drift;
-    vio_q = posegraph.r_drift * vio_q;
+    const geometry_msgs::PoseStamped corrected_pose = correct_pose(raw_pose);
+    Vector3d vio_t(corrected_pose.pose.position.x,
+                   corrected_pose.pose.position.y,
+                   corrected_pose.pose.position.z);
+    Quaterniond vio_q(corrected_pose.pose.orientation.w,
+                      corrected_pose.pose.orientation.x,
+                      corrected_pose.pose.orientation.y,
+                      corrected_pose.pose.orientation.z);
 
     nav_msgs::Odometry odometry;
     odometry.header = pose_msg->header;
@@ -278,7 +364,66 @@ void vio_callback(const nav_msgs::Odometry::ConstPtr &pose_msg)
     cameraposevisual.add_pose(vio_t_cam, vio_q_cam);
     cameraposevisual.publish_by(pub_camera_pose_visual, pose_msg->header);
 
-
+    // The graph topic contains only fully processed keyframes. During startup
+    // replay it can be seconds behind the estimator, so join the optimized
+    // history with all corrected VIO samples newer than the last graph pose.
+    nav_msgs::Path live_path = posegraph.pathSnapshot(sequence);
+    const double graph_stamp = live_path.poses.empty()
+        ? -1.0 : live_path.poses.back().header.stamp.toSec();
+    size_t tail_size = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_live_vio_tail);
+        // Keep buffered startup keyframes available for retrieval, but align
+        // the displayed red path with the first pose visible in the green VIO
+        // path so the two trajectories have the same visual start time.
+        if (!latest_vio_path.poses.empty())
+        {
+            const ros::Time display_start =
+                latest_vio_path.poses.front().header.stamp;
+            live_path.poses.erase(std::remove_if(live_path.poses.begin(),
+                live_path.poses.end(), [&](const geometry_msgs::PoseStamped &pose) {
+                    return pose.header.stamp < display_start;
+                }), live_path.poses.end());
+        }
+        live_vio_tail.push_back(raw_pose);
+        while (!live_vio_tail.empty() && graph_stamp >= 0.0 &&
+               live_vio_tail.front().header.stamp.toSec() <= graph_stamp + 1e-6)
+            live_vio_tail.pop_front();
+        while (live_vio_tail.size() > MAX_LIVE_VIO_TAIL_SIZE)
+            live_vio_tail.pop_front();
+        std::vector<geometry_msgs::PoseStamped> raw_tail;
+        if (!latest_vio_path.poses.empty())
+        {
+            const size_t begin = latest_vio_path.poses.size() > MAX_LIVE_VIO_TAIL_SIZE
+                ? latest_vio_path.poses.size() - MAX_LIVE_VIO_TAIL_SIZE : 0;
+            for (size_t i = begin; i < latest_vio_path.poses.size(); ++i)
+            {
+                const geometry_msgs::PoseStamped &candidate = latest_vio_path.poses[i];
+                const double stamp = candidate.header.stamp.toSec();
+                if (stamp > graph_stamp + 1e-6 &&
+                    stamp <= raw_pose.header.stamp.toSec() + 1e-6)
+                    raw_tail.push_back(candidate);
+            }
+        }
+        else
+        {
+            raw_tail.assign(live_vio_tail.begin(), live_vio_tail.end());
+        }
+        if (raw_tail.empty() ||
+            raw_tail.back().header.stamp < raw_pose.header.stamp)
+            raw_tail.push_back(raw_pose);
+        for (const geometry_msgs::PoseStamped &tail_pose : raw_tail)
+            live_path.poses.push_back(correct_pose(tail_pose));
+        tail_size = raw_tail.size();
+    }
+    live_path.header = corrected_pose.header;
+    live_path.header.frame_id = "world";
+    pub_pose_graph_path_live.publish(live_path);
+    ROS_INFO_THROTTLE(2.0,
+        "[loop_live_path] graph_lag=%.1fms graph_poses=%zu live_tail=%zu",
+        graph_stamp < 0.0 ? 0.0 :
+            (corrected_pose.header.stamp.toSec() - graph_stamp) * 1000.0,
+        live_path.poses.size() - tail_size, tail_size);
 }
 
 void extrinsic_callback(const nav_msgs::Odometry::ConstPtr &pose_msg)
@@ -304,9 +449,12 @@ void process()
         sensor_msgs::ImageConstPtr image1_msg = NULL;
         fishloop_vins::VIOKeyframeConstPtr keyframe_msg = NULL;
 
-        // find out the messages with same time stamp
+        // Synchronize every currently available keyframe before running the
+        // expensive DBoW/ORB/PnP stage. This keeps graph backlog in a sparse
+        // queue of exact stereo/keyframe triples instead of retaining every
+        // incoming 15 Hz raw image until graph processing catches up.
         m_buf.lock();
-        if(!image0_buf.empty() && !image1_buf.empty() && !keyframe_buf.empty())
+        while(!image0_buf.empty() && !image1_buf.empty() && !keyframe_buf.empty())
         {
             const double target = keyframe_buf.front()->header.stamp.toSec();
             const double image_tolerance = 0.02;
@@ -318,6 +466,7 @@ void process()
             if (image0_buf.empty() || image1_buf.empty())
             {
                 // Wait for the corresponding raw stereo images.
+                break;
             }
             else if (image0_buf.front()->header.stamp.toSec() > target + image_tolerance ||
                      image1_buf.front()->header.stamp.toSec() > target + image_tolerance)
@@ -327,14 +476,37 @@ void process()
             }
             else
             {
-                keyframe_msg = keyframe_buf.front();
+                SynchronizedKeyframe synchronized;
+                synchronized.keyframe = keyframe_buf.front();
                 keyframe_buf.pop();
-                image0_msg = image0_buf.front();
+                synchronized.image0 = image0_buf.front();
                 image0_buf.pop();
-                image1_msg = image1_buf.front();
+                synchronized.image1 = image1_buf.front();
                 image1_buf.pop();
+                synchronized_keyframe_buf.push(synchronized);
+                if (synchronized_keyframe_buf.size() >
+                    MAX_SYNCHRONIZED_KEYFRAME_BUFFER_SIZE)
+                {
+                    const double dropped_stamp = synchronized_keyframe_buf.front()
+                        .keyframe->header.stamp.toSec();
+                    synchronized_keyframe_buf.pop();
+                    ROS_WARN("drop synchronized VIO keyframe %.6f: processing queue exceeds %zu",
+                        dropped_stamp, MAX_SYNCHRONIZED_KEYFRAME_BUFFER_SIZE);
+                }
             }
         }
+        if (!synchronized_keyframe_buf.empty())
+        {
+            const SynchronizedKeyframe synchronized = synchronized_keyframe_buf.front();
+            synchronized_keyframe_buf.pop();
+            keyframe_msg = synchronized.keyframe;
+            image0_msg = synchronized.image0;
+            image1_msg = synchronized.image1;
+        }
+        ROS_INFO_THROTTLE(2.0,
+            "[loop_sync] raw=(%zu,%zu) pending_keyframes=%zu synchronized=%zu",
+            image0_buf.size(), image1_buf.size(), keyframe_buf.size(),
+            synchronized_keyframe_buf.size());
         m_buf.unlock();
 
         if (keyframe_msg != NULL)
@@ -591,6 +763,9 @@ int main(int argc, char **argv)
         LOOP_RETRIEVAL_VIEW_COUNT = (int)fsSettings["loop_retrieval_view_count"];
     if (!fsSettings["loop_retrieval_use_vio_features"].empty())
         LOOP_RETRIEVAL_USE_VIO_FEATURES = (int)fsSettings["loop_retrieval_use_vio_features"];
+    if (!fsSettings["loop_preserve_original_flow"].empty())
+        LOOP_PRESERVE_ORIGINAL_FLOW =
+            (int)fsSettings["loop_preserve_original_flow"] != 0;
     if (!fsSettings["loop_orb_geometry"].empty())
         LOOP_ORB_GEOMETRY = (int)fsSettings["loop_orb_geometry"];
     if (!fsSettings["loop_use_gpu"].empty())
@@ -683,6 +858,20 @@ int main(int argc, char **argv)
     if (!fsSettings["loop_camera_consistency_translation"].empty())
         LOOP_CAMERA_CONSISTENCY_TRANSLATION = std::max(0.0,
             (double)fsSettings["loop_camera_consistency_translation"]);
+    if (!fsSettings["loop_epipolar_min_matches"].empty())
+        LOOP_EPIPOLAR_MIN_MATCHES = std::max(8,
+            (int)fsSettings["loop_epipolar_min_matches"]);
+    if (!fsSettings["loop_epipolar_reprojection_error_px"].empty())
+        LOOP_EPIPOLAR_REPROJECTION_ERROR_PX = std::max(0.5,
+            (double)fsSettings["loop_epipolar_reprojection_error_px"]);
+    if (!fsSettings["loop_epipolar_confidence"].empty())
+        LOOP_EPIPOLAR_CONFIDENCE = (double)fsSettings["loop_epipolar_confidence"];
+    if (!(LOOP_EPIPOLAR_CONFIDENCE > 0.0 && LOOP_EPIPOLAR_CONFIDENCE < 1.0))
+    {
+        ROS_WARN("invalid loop_epipolar_confidence=%.6f; using 0.999",
+            LOOP_EPIPOLAR_CONFIDENCE);
+        LOOP_EPIPOLAR_CONFIDENCE = 0.999;
+    }
     if (!fsSettings["loop_pnp_ransac_iterations"].empty())
         LOOP_PNP_RANSAC_ITERATIONS = std::max(50,
             (int)fsSettings["loop_pnp_ransac_iterations"]);
@@ -771,8 +960,16 @@ int main(int argc, char **argv)
         LOOP_MIN_DETECT_INDEX = (int)fsSettings["loop_min_detect_index"];
     if (!fsSettings["loop_skip_first_keyframes"].empty())
         LOOP_SKIP_FIRST_KEYFRAMES = std::max(0, (int)fsSettings["loop_skip_first_keyframes"]);
+    if (!fsSettings["loop_keyframe_skip"].empty())
+        SKIP_CNT = std::max(0, (int)fsSettings["loop_keyframe_skip"]);
     if (!fsSettings["loop_dbow_max_results"].empty())
         LOOP_DBOW_MAX_RESULTS = (int)fsSettings["loop_dbow_max_results"];
+    if (!fsSettings["loop_candidate_neighbor_window"].empty())
+        LOOP_CANDIDATE_NEIGHBOR_WINDOW = std::max(0,
+            (int)fsSettings["loop_candidate_neighbor_window"]);
+    if (!fsSettings["loop_candidate_neighbor_stride"].empty())
+        LOOP_CANDIDATE_NEIGHBOR_STRIDE = std::max(1,
+            (int)fsSettings["loop_candidate_neighbor_stride"]);
     if (!fsSettings["loop_dbow_min_neighbor_score"].empty())
         LOOP_DBOW_MIN_NEIGHBOR_SCORE = (double)fsSettings["loop_dbow_min_neighbor_score"];
     if (!fsSettings["loop_dbow_min_candidate_score"].empty())
@@ -781,19 +978,21 @@ int main(int argc, char **argv)
         LOOP_MAX_YAW_DEG = (double)fsSettings["loop_max_yaw_deg"];
     if (!fsSettings["loop_max_translation"].empty())
         LOOP_MAX_TRANSLATION = (double)fsSettings["loop_max_translation"];
-    printf("[loop_fusion] min_inliers=%d fast_th=%d brief_dist_th=%d brief_ratio=%.2f "
-           "dbow_top=%d query_gap=%d min_idx=%d skip_first=%d "
+    printf("[loop_fusion] original_flow=%d min_inliers=%d fast_th=%d brief_dist_th=%d brief_ratio=%.2f "
+           "dbow_top=%d neighbor=%d/%d query_gap=%d min_idx=%d skip_first=%d keyframe_skip=%d "
            "dbow_best=%.3f dbow_candidate=%.3f max_yaw=%.1f max_t=%.1f "
 	           "orb=%d gpu=%d orb_features=%d orb_fast=%d orb_dist=%d orb_ratio=%.2f "
            "exact_dense=%d/%.2f/%d "
            "dense_dist=%d dense_ratio=%.2f dense_geom=%d dense_pnp=%d dense_h=%.1f dense_yaw=%.1f "
            "orb_radius=%.1f "
            "force_first=%d/%d temporal=%d/%d window=%d per_cam=%d single=%d/%.2f "
-           "consistency=%.1fdeg/%.2fm "
+           "consistency=%.1fdeg/%.2fm epipolar=%d/%.1fpx/%.4f "
            "pnp=%diter/%.1fpx/%.4f\n",
+           LOOP_PRESERVE_ORIGINAL_FLOW,
            LOOP_MIN_LOOP_NUM, LOOP_FAST_TH, LOOP_BRIEF_DIST_TH, LOOP_BRIEF_RATIO_TH,
-           LOOP_DBOW_MAX_RESULTS, LOOP_MIN_QUERY_GAP, LOOP_MIN_DETECT_INDEX,
-           LOOP_SKIP_FIRST_KEYFRAMES,
+           LOOP_DBOW_MAX_RESULTS, LOOP_CANDIDATE_NEIGHBOR_WINDOW,
+           LOOP_CANDIDATE_NEIGHBOR_STRIDE, LOOP_MIN_QUERY_GAP, LOOP_MIN_DETECT_INDEX,
+           LOOP_SKIP_FIRST_KEYFRAMES, SKIP_CNT,
            LOOP_DBOW_MIN_NEIGHBOR_SCORE, LOOP_DBOW_MIN_CANDIDATE_SCORE,
            LOOP_MAX_YAW_DEG, LOOP_MAX_TRANSLATION,
            LOOP_ORB_GEOMETRY, LOOP_USE_GPU, LOOP_ORB_FEATURES, LOOP_ORB_FAST_TH,
@@ -812,6 +1011,8 @@ int main(int argc, char **argv)
            LOOP_SINGLE_CAMERA_MIN_INLIER_RATIO,
            LOOP_CAMERA_CONSISTENCY_ROTATION_DEG,
            LOOP_CAMERA_CONSISTENCY_TRANSLATION,
+           LOOP_EPIPOLAR_MIN_MATCHES, LOOP_EPIPOLAR_REPROJECTION_ERROR_PX,
+           LOOP_EPIPOLAR_CONFIDENCE,
            LOOP_PNP_RANSAC_ITERATIONS, LOOP_PNP_REPROJECTION_ERROR_PX,
            LOOP_PNP_CONFIDENCE);
 
@@ -846,6 +1047,9 @@ int main(int argc, char **argv)
     }
 
     ros::Subscriber sub_vio = n.subscribe("/vins_estimator/odometry", 2000, vio_callback);
+	ros::Subscriber sub_vio_path = n.subscribe("/vins_estimator/path", 10, vio_path_callback);
+	ros::Subscriber sub_estimator_reset = n.subscribe(
+		"/vins_estimator/reset", 10, estimator_reset_callback);
 	ros::Subscriber sub_image0 = n.subscribe(IMAGE_TOPIC0, 30, image0_callback);
 	ros::Subscriber sub_image1 = n.subscribe(IMAGE_TOPIC1, 30, image1_callback);
 	ros::Subscriber sub_keyframe = n.subscribe("/vins_estimator/viokeyframe", 100, keyframe_callback);
@@ -858,6 +1062,7 @@ int main(int argc, char **argv)
     pub_point_cloud = n.advertise<sensor_msgs::PointCloud>("point_cloud_loop_rect", 1000);
     pub_margin_cloud = n.advertise<sensor_msgs::PointCloud>("margin_cloud_loop_rect", 1000);
     pub_odometry_rect = n.advertise<nav_msgs::Odometry>("odometry_rect", 1000);
+    pub_pose_graph_path_live = n.advertise<nav_msgs::Path>("pose_graph_path_live", 1000);
 
     std::thread measurement_process;
     std::thread keyboard_command_process;

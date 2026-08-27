@@ -288,7 +288,7 @@ static void publishLoopMatchImage(
 		std_msgs::Header(), "bgr8", canvas).toImageMsg();
 	msg->header.stamp = ros::Time(current_kf.time_stamp);
 	pub_match_img.publish(msg);
-	ROS_INFO("[loop_fusion] published match image cur=%d old=%d inliers=%d",
+	ROS_INFO("[loop_fusion] published accepted match image cur=%d old=%d inliers=%d",
 		current_kf.index, old_kf.index, drawn_inliers);
 }
 
@@ -759,6 +759,10 @@ void KeyFrame::computeRetrievalBRIEFPoint()
 	const int camera_count = std::min(2, LOOP_RETRIEVAL_CAMERA_COUNT);
 	retrieval_view_descriptors.assign(camera_count * LOOP_RETRIEVAL_VIEW_COUNT,
 		vector<BRIEF::bitset>());
+	vector<cv::KeyPoint> canonical_keypoints_raw;
+	vector<cv::KeyPoint> canonical_keypoints_norm;
+	vector<BRIEF::bitset> canonical_descriptors;
+	vector<int> canonical_camera_ids;
 	for (int camera_id = 0; camera_id < camera_count; ++camera_id)
 	{
 		if (camera_id >= (int)canonical_views.size())
@@ -799,10 +803,54 @@ void KeyFrame::computeRetrievalBRIEFPoint()
 				view_descriptors;
 			retrieval_brief_descriptors.insert(retrieval_brief_descriptors.end(),
 				view_descriptors.begin(), view_descriptors.end());
+
+			// Stock VINS-Fusion matches current window descriptors against dense
+			// BRIEF features from the old image. For a fisheye camera, the dense
+			// image is the set of canonical perspective views; map every detected
+			// feature back to its raw EUCM pixel and bearing for geometric checks.
+			const int descriptor_count = std::min<int>(
+				view_keypoints.size(), view_descriptors.size());
+			const cv::Mat &map_x = LOOP_VIEW_MAPS[camera_id][view_id].first;
+			const cv::Mat &map_y = LOOP_VIEW_MAPS[camera_id][view_id].second;
+			if (map_x.type() != CV_32FC1 || map_y.type() != CV_32FC1)
+				continue;
+			for (int i = 0; i < descriptor_count; ++i)
+			{
+				const int x = cvRound(view_keypoints[i].pt.x);
+				const int y = cvRound(view_keypoints[i].pt.y);
+				if (x < 0 || x >= map_x.cols || y < 0 || y >= map_x.rows)
+					continue;
+				const float raw_x = map_x.at<float>(y, x);
+				const float raw_y = map_y.at<float>(y, x);
+				if (!std::isfinite(raw_x) || !std::isfinite(raw_y))
+					continue;
+				Eigen::Vector3d bearing;
+				m_cameras[camera_id]->liftProjective(
+					Eigen::Vector2d(raw_x, raw_y), bearing);
+				if (!bearing.allFinite() || bearing.z() <= LOOP_EUCM_MIN_Z)
+					continue;
+				cv::KeyPoint raw_key = view_keypoints[i];
+				raw_key.pt = cv::Point2f(raw_x, raw_y);
+				cv::KeyPoint norm_key = raw_key;
+				norm_key.pt = cv::Point2f(
+					bearing.x() / bearing.z(), bearing.y() / bearing.z());
+				canonical_keypoints_raw.push_back(raw_key);
+				canonical_keypoints_norm.push_back(norm_key);
+				canonical_descriptors.push_back(view_descriptors[i]);
+				canonical_camera_ids.push_back(camera_id);
+			}
 		}
 	}
 	if (retrieval_brief_descriptors.empty())
 		retrieval_brief_descriptors = brief_descriptors;
+	if (!canonical_descriptors.empty())
+	{
+		retrieval_brief_descriptors = canonical_descriptors;
+		keypoints.swap(canonical_keypoints_raw);
+		keypoints_norm.swap(canonical_keypoints_norm);
+		brief_descriptors.swap(canonical_descriptors);
+		brief_keypoint_camera_ids.swap(canonical_camera_ids);
+	}
 }
 
 void KeyFrame::computeORBPoint()
@@ -821,6 +869,9 @@ void KeyFrame::computeORBPoint()
 	window_orb_keypoints.clear();
 	window_orb_point_indices.clear();
 	window_orb_descriptors.release();
+	int exact_requested_keypoints = 0;
+	int exact_returned_keypoints = 0;
+	int exact_fallback_bindings = 0;
 	for (int global_view = 0; global_view < (int)view_feature_indices.size(); ++global_view)
 	{
 		const int view_count = std::max(1, (int)LOOP_VIEW_ROTATIONS.size());
@@ -836,16 +887,60 @@ void KeyFrame::computeORBPoint()
 		{
 			cv::KeyPoint key(loop_features[feature_index].virtual_uv, 31.f);
 			key.angle = canonicalPatchAngle(canonical_views[camera_id][view_id], key.pt);
+			// ORB::compute() may remove provided keypoints near a pyramid border.
+			// Carry the VIO feature index through the mutable keypoint array instead
+			// of assuming descriptor row i still belongs to input row i.
+			key.class_id = feature_index;
 			keys.push_back(key);
 			feature_indices.push_back(feature_index);
 		}
+		exact_requested_keypoints += keys.size();
 		cv::Mat descriptors;
 		orb->compute(canonical_views[camera_id][view_id], keys, descriptors);
 		const int count = std::min<int>(descriptors.rows,
 			std::min<int>(keys.size(), feature_indices.size()));
+		exact_returned_keypoints += count;
+		std::vector<uchar> feature_bound(feature_indices.size(), 0);
 		for (int i = 0; i < count; ++i)
 		{
-			const int feature_index = feature_indices[i];
+			int feature_index = keys[i].class_id;
+			if (feature_index < 0 || feature_index >= (int)loop_features.size() ||
+				loop_features[feature_index].camera_id != camera_id ||
+				loop_features[feature_index].view_id != view_id)
+			{
+				// Some OpenCV builds do not preserve class_id for supplied
+				// keypoints. Recover the binding by the unchanged canonical pixel.
+				double best_distance2 = 0.25;
+				int best_local_index = -1;
+				for (int local_index = 0;
+					local_index < (int)feature_indices.size(); ++local_index)
+				{
+					if (feature_bound[local_index])
+						continue;
+					const int candidate_index = feature_indices[local_index];
+					const cv::Point2f delta =
+						loop_features[candidate_index].virtual_uv - keys[i].pt;
+					const double distance2 = delta.dot(delta);
+					if (distance2 < best_distance2)
+					{
+						best_distance2 = distance2;
+						best_local_index = local_index;
+					}
+				}
+				if (best_local_index < 0)
+					continue;
+				feature_index = feature_indices[best_local_index];
+				exact_fallback_bindings++;
+			}
+			auto feature_it = std::find(feature_indices.begin(),
+				feature_indices.end(), feature_index);
+			if (feature_it == feature_indices.end())
+				continue;
+			const int local_feature_index =
+				static_cast<int>(feature_it - feature_indices.begin());
+			if (feature_bound[local_feature_index])
+				continue;
+			feature_bound[local_feature_index] = 1;
 			loop_features[feature_index].orb_descriptor = descriptors.row(i).clone();
 			window_orb_keypoints.push_back(keys[i]);
 			window_orb_point_indices.push_back(feature_index);
@@ -988,9 +1083,12 @@ void KeyFrame::computeORBPoint()
 		const int dense_cam1 = std::count(orb_keypoint_camera_ids.begin(),
 			orb_keypoint_camera_ids.end(), 1);
 		ROS_INFO("[loop_fusion][ORB-extract] frame=%d dense_canonical=%zu "
-			"cams=%d/%d exact_vio=%zu/%zu views=%d budget=%d/view",
+			"cams=%d/%d exact_vio=%zu/%zu requested/returned=%d/%d "
+			"fallback_bindings=%d views=%d budget=%d/view",
 			index, orb_keypoints.size(), dense_cam0, dense_cam1,
 			window_orb_point_indices.size(), point_2d_uv.size(),
+			exact_requested_keypoints, exact_returned_keypoints,
+			exact_fallback_bindings,
 			available_dense_views, features_per_view);
 		ROS_INFO("[loop_fusion][canonical-roundtrip] frame=%d samples=%d "
 			"raw_px_mean/max=%.3f/%.3f bearing_deg_mean/max=%.5f/%.5f",
@@ -1042,6 +1140,53 @@ BriefMatchStats KeyFrame::searchByBRIEFDes(std::vector<cv::Point2f> &matched_2d_
 	if (stats.query_count == 0 || stats.train_count < 2)
 		return stats;
 
+	if (LOOP_PRESERVE_ORIGINAL_FLOW)
+	{
+		double best_distance_sum = 0.0;
+		int best_distance_count = 0;
+		for (int query_index = 0; query_index < stats.query_count; ++query_index)
+		{
+			if (query_index >= (int)loop_features.size())
+				continue;
+			const int current_camera = loop_features[query_index].camera_id;
+			int best_index = -1;
+			int best_distance = 128;
+			for (int train_index = 0; train_index < stats.train_count; ++train_index)
+			{
+				if (train_index >= (int)camera_ids_old.size() ||
+					camera_ids_old[train_index] != current_camera)
+					continue;
+				const int distance = HammingDis(
+					window_brief_descriptors[query_index],
+					descriptors_old[train_index]);
+				if (distance < best_distance)
+				{
+					best_distance = distance;
+					best_index = train_index;
+				}
+			}
+			if (best_index < 0)
+				continue;
+			best_distance_sum += best_distance;
+			best_distance_count++;
+			if (best_distance >= LOOP_BRIEF_DIST_TH)
+				continue;
+			status[query_index] = 1;
+			matched_2d_old[query_index] = keypoints_old[best_index].pt;
+			matched_2d_old_norm[query_index] = keypoints_old_norm[best_index].pt;
+			matched_camera_old[query_index] = camera_ids_old[best_index];
+			if (best_index < (int)feature_indices_old.size())
+				matched_feature_old[query_index] = feature_indices_old[best_index];
+			stats.distance_pass++;
+			stats.ratio_pass++;
+			stats.mutual_unique_pass++;
+		}
+		if (best_distance_count > 0)
+			stats.mean_best_distance = best_distance_sum / best_distance_count;
+		stats.unique_train_after_ratio = stats.distance_pass;
+		return stats;
+	}
+
 	struct Candidate
 	{
 		int query_index;
@@ -1056,15 +1201,22 @@ BriefMatchStats KeyFrame::searchByBRIEFDes(std::vector<cv::Point2f> &matched_2d_
 	std::vector<int> reverse_best_distance(stats.train_count, std::numeric_limits<int>::max());
 	std::vector<uchar> ratio_train_used(stats.train_count, 0);
 	double best_distance_sum = 0.0;
+	int best_distance_count = 0;
 
 	for (int query_index = 0; query_index < stats.query_count; ++query_index)
 	{
+		if (query_index >= (int)loop_features.size())
+			continue;
+		const int current_camera = loop_features[query_index].camera_id;
 		int best_index = -1;
 		int best_distance = std::numeric_limits<int>::max();
 		int second_distance = std::numeric_limits<int>::max();
 
 		for (int train_index = 0; train_index < stats.train_count; ++train_index)
 		{
+			if (train_index >= (int)camera_ids_old.size() ||
+				camera_ids_old[train_index] != current_camera)
+				continue;
 			const int distance = HammingDis(window_brief_descriptors[query_index],
 				descriptors_old[train_index]);
 			if (distance < best_distance)
@@ -1089,6 +1241,7 @@ BriefMatchStats KeyFrame::searchByBRIEFDes(std::vector<cv::Point2f> &matched_2d_
 		if (best_index < 0)
 			continue;
 		best_distance_sum += best_distance;
+		best_distance_count++;
 		if (best_distance >= LOOP_BRIEF_DIST_TH)
 			continue;
 		stats.distance_pass++;
@@ -1106,7 +1259,8 @@ BriefMatchStats KeyFrame::searchByBRIEFDes(std::vector<cv::Point2f> &matched_2d_
 		ratio_candidates.push_back({query_index, best_index, best_distance, second_distance});
 	}
 
-	stats.mean_best_distance = best_distance_sum / stats.query_count;
+	if (best_distance_count > 0)
+		stats.mean_best_distance = best_distance_sum / best_distance_count;
 	for (uchar used : ratio_train_used)
 		stats.unique_train_after_ratio += used ? 1 : 0;
 
@@ -1175,19 +1329,6 @@ OrbMatchStats KeyFrame::searchByORBDes(std::vector<cv::Point2f> &matched_2d_old,
 	if (stats.query_count == 0 || stats.train_count < 2)
 		return stats;
 
-	cv::Mat query_descriptors = current_descriptors.rowRange(0, stats.query_count);
-	cv::Mat train_descriptors = old_descriptors.rowRange(0, stats.train_count);
-	std::vector<std::vector<cv::DMatch>> forward_matches;
-	std::vector<std::vector<cv::DMatch>> reverse_matches;
-	stats.gpu_used = cudaOrbKnnMatch(query_descriptors, train_descriptors,
-		forward_matches, reverse_matches);
-	if (!stats.gpu_used)
-	{
-		cv::BFMatcher matcher(cv::NORM_HAMMING, false);
-		matcher.knnMatch(query_descriptors, train_descriptors, forward_matches, 2);
-		matcher.knnMatch(train_descriptors, query_descriptors, reverse_matches, 1);
-	}
-
 	double best_distance_sum = 0.0;
 	int best_distance_count = 0;
 	struct AcceptedMatch
@@ -1197,37 +1338,117 @@ OrbMatchStats KeyFrame::searchByORBDes(std::vector<cv::Point2f> &matched_2d_old,
 		float descriptor_distance;
 	};
 	std::vector<AcceptedMatch> accepted_matches;
-	auto append_exact_match = [&](const cv::DMatch &match)
+	auto current_camera_for_row = [&](int query_row)
 	{
-		const int point_index = window_orb_point_indices[match.queryIdx];
-		if (point_index < 0 || point_index >= output_count)
-			return;
-		accepted_matches.push_back({point_index, match.trainIdx, match.distance});
+		if (query_row < 0 || query_row >= stats.query_count)
+			return -1;
+		const int point_index = window_orb_point_indices[query_row];
+		if (point_index < 0 || point_index >= (int)loop_features.size())
+			return -1;
+		return loop_features[point_index].camera_id;
 	};
-	for (int query_row = 0; query_row < (int)forward_matches.size(); ++query_row)
+	auto old_camera_for_row = [&](int train_row)
 	{
-		if (forward_matches[query_row].empty())
-			continue;
-		const cv::DMatch &best = forward_matches[query_row][0];
-		best_distance_sum += best.distance;
-		best_distance_count++;
-		if (best.distance >= distance_threshold)
-			continue;
-		stats.distance_pass++;
-		if (forward_matches[query_row].size() < 2)
-			continue;
-		const cv::DMatch &second = forward_matches[query_row][1];
-		if (!(best.distance < second.distance) ||
-			best.distance > ratio_threshold * second.distance)
-			continue;
-		stats.ratio_pass++;
-		if (best.trainIdx < 0 || best.trainIdx >= (int)reverse_matches.size() ||
-			reverse_matches[best.trainIdx].empty() ||
-			reverse_matches[best.trainIdx][0].trainIdx != query_row)
+		if (train_row < 0 || train_row >= stats.train_count)
+			return -1;
+		if (dense_old)
+			return old_kf->orb_keypoint_camera_ids[train_row];
+		const int old_feature_index = old_kf->window_orb_point_indices[train_row];
+		if (old_feature_index < 0 ||
+			old_feature_index >= (int)old_kf->loop_features.size())
+			return -1;
+		return old_kf->loop_features[old_feature_index].camera_id;
+	};
+
+	// This is a rigid stereo rig: a temporal loop correspondence must preserve
+	// camera identity. Matching a combined descriptor pool allows similar views
+	// from cam0/cam1 to swap, which weakens each camera's independent PnP and
+	// produces misleading cross-camera debug lines. Run KNN independently for
+	// every camera so both the ratio test and mutual check are camera-local.
+	int max_camera_id = -1;
+	std::vector<int> query_camera_ids(stats.query_count, -1);
+	std::vector<int> train_camera_ids(stats.train_count, -1);
+	for (int row = 0; row < stats.query_count; ++row)
+	{
+		query_camera_ids[row] = current_camera_for_row(row);
+		max_camera_id = std::max(max_camera_id, query_camera_ids[row]);
+	}
+	for (int row = 0; row < stats.train_count; ++row)
+	{
+		train_camera_ids[row] = old_camera_for_row(row);
+		max_camera_id = std::max(max_camera_id, train_camera_ids[row]);
+	}
+	if (max_camera_id < 0)
+		return stats;
+
+	std::vector<std::vector<int>> query_rows(max_camera_id + 1);
+	std::vector<std::vector<int>> train_rows(max_camera_id + 1);
+	for (int row = 0; row < stats.query_count; ++row)
+		if (query_camera_ids[row] >= 0)
+			query_rows[query_camera_ids[row]].push_back(row);
+	for (int row = 0; row < stats.train_count; ++row)
+		if (train_camera_ids[row] >= 0)
+			train_rows[train_camera_ids[row]].push_back(row);
+
+	bool matcher_attempted = false;
+	bool all_matchers_used_gpu = true;
+	for (int camera_id = 0; camera_id <= max_camera_id; ++camera_id)
+	{
+		if (query_rows[camera_id].empty() || train_rows[camera_id].size() < 2)
 			continue;
 
-		append_exact_match(best);
+		cv::Mat query_descriptors;
+		cv::Mat train_descriptors;
+		for (int row : query_rows[camera_id])
+			query_descriptors.push_back(current_descriptors.row(row));
+		for (int row : train_rows[camera_id])
+			train_descriptors.push_back(old_descriptors.row(row));
+
+		std::vector<std::vector<cv::DMatch>> forward_matches;
+		std::vector<std::vector<cv::DMatch>> reverse_matches;
+		const bool camera_gpu_used = cudaOrbKnnMatch(query_descriptors,
+			train_descriptors, forward_matches, reverse_matches);
+		matcher_attempted = true;
+		all_matchers_used_gpu = all_matchers_used_gpu && camera_gpu_used;
+		if (!camera_gpu_used)
+		{
+			cv::BFMatcher matcher(cv::NORM_HAMMING, false);
+			matcher.knnMatch(query_descriptors, train_descriptors, forward_matches, 2);
+			matcher.knnMatch(train_descriptors, query_descriptors, reverse_matches, 1);
+		}
+
+		for (int local_query_row = 0;
+			local_query_row < (int)forward_matches.size(); ++local_query_row)
+		{
+			if (forward_matches[local_query_row].empty())
+				continue;
+			const cv::DMatch &best = forward_matches[local_query_row][0];
+			best_distance_sum += best.distance;
+			best_distance_count++;
+			if (best.distance >= distance_threshold)
+				continue;
+			stats.distance_pass++;
+			if (forward_matches[local_query_row].size() < 2)
+				continue;
+			const cv::DMatch &second = forward_matches[local_query_row][1];
+			if (!(best.distance < second.distance) ||
+				best.distance > ratio_threshold * second.distance)
+				continue;
+			stats.ratio_pass++;
+			if (best.trainIdx < 0 || best.trainIdx >= (int)reverse_matches.size() ||
+				reverse_matches[best.trainIdx].empty() ||
+				reverse_matches[best.trainIdx][0].trainIdx != local_query_row)
+				continue;
+
+			const int query_row = query_rows[camera_id][local_query_row];
+			const int train_row = train_rows[camera_id][best.trainIdx];
+			const int point_index = window_orb_point_indices[query_row];
+			if (point_index < 0 || point_index >= output_count)
+				continue;
+			accepted_matches.push_back({point_index, train_row, best.distance});
+		}
 	}
+	stats.gpu_used = matcher_attempted && all_matchers_used_gpu;
 
 	if (best_distance_count > 0)
 		stats.mean_best_distance = best_distance_sum / best_distance_count;
@@ -1273,30 +1494,42 @@ OrbMatchStats KeyFrame::searchByORBDes(std::vector<cv::Point2f> &matched_2d_old,
 }
 
 
-void KeyFrame::FundmantalMatrixRANSAC(const std::vector<cv::Point2f> &matched_2d_cur_norm,
-                                      const std::vector<cv::Point2f> &matched_2d_old_norm,
-                                      vector<uchar> &status)
+bool KeyFrame::EpipolarRANSAC(
+	const std::vector<cv::Point2f> &matched_2d_cur_norm,
+	const std::vector<cv::Point2f> &matched_2d_old_norm,
+	vector<uchar> &status) const
 {
-	int n = (int)matched_2d_cur_norm.size();
-	for (int i = 0; i < n; i++)
-		status.push_back(0);
-    if (n >= 8)
-    {
-        vector<cv::Point2f> tmp_cur(n), tmp_old(n);
-        for (int i = 0; i < (int)matched_2d_cur_norm.size(); i++)
-        {
-            double FOCAL_LENGTH = LOOP_FOCAL_LENGTH;
-            double tmp_x, tmp_y;
-            tmp_x = FOCAL_LENGTH * matched_2d_cur_norm[i].x + COL / 2.0;
-            tmp_y = FOCAL_LENGTH * matched_2d_cur_norm[i].y + ROW / 2.0;
-            tmp_cur[i] = cv::Point2f(tmp_x, tmp_y);
+	const int count = static_cast<int>(matched_2d_cur_norm.size());
+	status.assign(count, 1);
+	if (matched_2d_old_norm.size() != matched_2d_cur_norm.size() ||
+		count < LOOP_EPIPOLAR_MIN_MATCHES)
+		return false;
 
-            tmp_x = FOCAL_LENGTH * matched_2d_old_norm[i].x + COL / 2.0;
-            tmp_y = FOCAL_LENGTH * matched_2d_old_norm[i].y + ROW / 2.0;
-            tmp_old[i] = cv::Point2f(tmp_x, tmp_y);
-        }
-        cv::findFundamentalMat(tmp_cur, tmp_old, cv::FM_RANSAC, 3.0, 0.9, status);
-    }
+	const double normalized_threshold = LOOP_EPIPOLAR_REPROJECTION_ERROR_PX /
+		std::max(1.0, LOOP_VIEW_FOCAL);
+	cv::Mat mask;
+	try
+	{
+		const cv::Mat essential = cv::findEssentialMat(
+			matched_2d_cur_norm, matched_2d_old_norm, 1.0, cv::Point2d(0.0, 0.0),
+			cv::RANSAC, LOOP_EPIPOLAR_CONFIDENCE, normalized_threshold, mask);
+		if (essential.empty() || mask.empty() || mask.total() != (size_t)count)
+			return false;
+	}
+	catch (const cv::Exception &exception)
+	{
+		ROS_WARN_THROTTLE(1.0,
+			"[loop_fusion][epipolar] Essential RANSAC exception: %s",
+			exception.what());
+		return false;
+	}
+
+	if (!mask.isContinuous())
+		mask = mask.clone();
+	const uchar *mask_data = mask.ptr<uchar>(0);
+	for (int i = 0; i < count; ++i)
+		status[i] = mask_data[i] ? 1 : 0;
+	return true;
 }
 
 bool KeyFrame::PnPRANSAC(const vector<cv::Point2f> &matched_2d_old_norm,
@@ -1415,7 +1648,47 @@ bool KeyFrame::PnPRANSAC(const vector<cv::Point2f> &matched_2d_old_norm,
 }
 
 
-bool KeyFrame::findConnection(KeyFrame* old_kf)
+bool KeyFrame::findConnection(KeyFrame* old_kf, bool allow_dense_fallback)
+{
+	if (old_kf == nullptr)
+		return false;
+	if (LOOP_PRESERVE_ORIGINAL_FLOW)
+		return findConnectionWithORBSource(old_kf, false);
+	const bool current_exact_ready =
+		window_orb_descriptors.rows > LOOP_PER_CAMERA_MIN_INLIERS &&
+		(int)window_orb_point_indices.size() > LOOP_PER_CAMERA_MIN_INLIERS;
+	const bool old_exact_ready =
+		old_kf->window_orb_descriptors.rows > LOOP_PER_CAMERA_MIN_INLIERS &&
+		(int)old_kf->window_orb_point_indices.size() > LOOP_PER_CAMERA_MIN_INLIERS;
+	const bool old_dense_ready =
+		old_kf->orb_descriptors.rows > LOOP_PER_CAMERA_MIN_INLIERS &&
+		(int)old_kf->orb_keypoints_raw.size() > LOOP_PER_CAMERA_MIN_INLIERS &&
+		(int)old_kf->orb_keypoints_norm.size() > LOOP_PER_CAMERA_MIN_INLIERS &&
+		(int)old_kf->orb_keypoint_camera_ids.size() > LOOP_PER_CAMERA_MIN_INLIERS;
+
+	bool exact_attempted = false;
+	if (LOOP_ORB_GEOMETRY && current_exact_ready && old_exact_ready)
+	{
+		exact_attempted = true;
+		if (findConnectionWithORBSource(old_kf, false))
+			return true;
+	}
+	if (LOOP_ORB_GEOMETRY && allow_dense_fallback &&
+		current_exact_ready && old_dense_ready)
+	{
+		ROS_INFO("[loop_fusion][ORB] cur=%d old=%d exact-exact rejected; trying dense fallback",
+			index, old_kf->index);
+		return findConnectionWithORBSource(old_kf, true);
+	}
+	if (exact_attempted)
+		return false;
+
+	// Preserve BRIEF verification for legacy/loaded keyframes that do not
+	// contain the exact VIO ORB descriptor set.
+	return findConnectionWithORBSource(old_kf, false);
+}
+
+bool KeyFrame::findConnectionWithORBSource(KeyFrame* old_kf, bool dense_old)
 {
 	TicToc tmp_t;
 	//printf("find Connection\n");
@@ -1463,7 +1736,8 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	    }
 	#endif
 	//printf("search by des\n");
-	const bool forced_early_candidate = LOOP_ORB_GEOMETRY &&
+	const bool forced_early_candidate = !LOOP_PRESERVE_ORIGINAL_FLOW &&
+		LOOP_ORB_GEOMETRY &&
 		LOOP_FORCE_FIRST_KEYFRAMES > 0 && old_kf->index >= 0 &&
 		old_kf->index < LOOP_FORCE_FIRST_KEYFRAMES;
 	const bool current_exact_ready =
@@ -1477,9 +1751,10 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	const bool old_exact_ready =
 		old_kf->window_orb_descriptors.rows > LOOP_PER_CAMERA_MIN_INLIERS &&
 		(int)old_kf->window_orb_point_indices.size() > LOOP_PER_CAMERA_MIN_INLIERS;
-	const bool use_exact_dense_old = current_exact_ready && old_dense_ready;
-	const bool use_orb = LOOP_ORB_GEOMETRY && current_exact_ready &&
-		(old_dense_ready || old_exact_ready);
+	const bool use_exact_dense_old = dense_old && current_exact_ready && old_dense_ready;
+	const bool use_orb = !LOOP_PRESERVE_ORIGINAL_FLOW &&
+		LOOP_ORB_GEOMETRY && current_exact_ready &&
+		(use_exact_dense_old || (!dense_old && old_exact_ready));
 	const int orb_distance_threshold = use_exact_dense_old
 		? (forced_early_candidate ? LOOP_ORB_DENSE_DIST_TH :
 			LOOP_ORB_EXACT_DENSE_DIST_TH)
@@ -1491,7 +1766,7 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	const char *orb_source = use_exact_dense_old
 		? (forced_early_candidate ? "exact-VIO-to-dense-canonical-old-forced" :
 			"exact-VIO-to-dense-canonical-old")
-		: "exact-VIO-to-exact-VIO-fallback";
+		: "exact-VIO-to-exact-VIO";
 	if (use_orb)
 	{
 			const OrbMatchStats orb_stats = searchByORBDes(
@@ -1511,7 +1786,8 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	}
 	else
 	{
-		const bool use_old_window = !old_kf->window_brief_descriptors.empty() &&
+		const bool use_old_window = !LOOP_PRESERVE_ORIGINAL_FLOW &&
+			!old_kf->window_brief_descriptors.empty() &&
 			old_kf->window_brief_descriptors.size() == old_kf->window_keypoints.size() &&
 			old_kf->window_keypoints.size() == old_kf->window_keypoints_norm.size();
 		const std::vector<BRIEF::bitset> &old_descriptors = use_old_window
@@ -1530,6 +1806,11 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 					old_camera_ids[i] = old_kf->loop_features[i].camera_id;
 					old_feature_indices[i] = i;
 				}
+			}
+			else if (old_kf->brief_keypoint_camera_ids.size() ==
+				old_descriptors.size())
+			{
+				old_camera_ids = old_kf->brief_keypoint_camera_ids;
 			}
 			const BriefMatchStats brief_stats = searchByBRIEFDes(
 				matched_2d_old, matched_2d_old_norm, status, matched_camera_old,
@@ -1555,18 +1836,31 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	reduceVector(matched_camera_old, status);
 	reduceVector(matched_feature_old, status);
 	const int eucm_descriptor_matches = matched_3d.size();
+	int camera_pairs[2][2] = {{0, 0}, {0, 0}};
+	for (int i = 0; i < std::min<int>(matched_camera_cur.size(),
+		matched_camera_old.size()); ++i)
+	{
+		const int current_camera = matched_camera_cur[i];
+		const int old_camera = matched_camera_old[i];
+		if (current_camera >= 0 && current_camera < 2 &&
+			old_camera >= 0 && old_camera < 2)
+			camera_pairs[current_camera][old_camera]++;
+	}
 	const bool forced_geometry_active = use_orb && use_exact_dense_old &&
 		forced_early_candidate;
 	const bool exact_dense_geometry_active = use_orb && use_exact_dense_old;
 	const int required_pnp_inliers = forced_geometry_active
 		? LOOP_ORB_DENSE_MIN_INLIERS
-		: (exact_dense_geometry_active ? LOOP_ORB_EXACT_DENSE_MIN_INLIERS :
+		: (use_orb ? LOOP_ORB_EXACT_DENSE_MIN_INLIERS :
 			LOOP_MIN_LOOP_NUM + 1);
-	ROS_INFO("[loop_fusion][EUCM-PnP] cur=%d old=%d cam=multi descriptor_matches=%d required=%d source=%s",
+	ROS_INFO("[loop_fusion][EUCM-PnP] cur=%d old=%d cam=multi descriptor_matches=%d "
+		"pairs=0->0:%d,0->1:%d,1->0:%d,1->1:%d required=%d source=%s",
 		index, old_kf->index, eucm_descriptor_matches,
+		camera_pairs[0][0], camera_pairs[0][1],
+		camera_pairs[1][0], camera_pairs[1][1],
 		required_pnp_inliers,
 		use_orb ? (exact_dense_geometry_active ? "ORB-exact-dense" :
-			"ORB-exact-fallback") : "BRIEF");
+			"ORB-exact-exact") : "BRIEF");
 	//printf("search by des finish\n");
 
 	#if 0 
@@ -1616,15 +1910,6 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	    }
 	#endif
 	status.clear();
-	/*
-	FundmantalMatrixRANSAC(matched_2d_cur_norm, matched_2d_old_norm, status);
-	reduceVector(matched_2d_cur, status);
-	reduceVector(matched_2d_old, status);
-	reduceVector(matched_2d_cur_norm, status);
-	reduceVector(matched_2d_old_norm, status);
-	reduceVector(matched_3d, status);
-	reduceVector(matched_id, status);
-	*/
 	#if 0
 		if (DEBUG_IMAGE)
 	    {
@@ -1745,7 +2030,9 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	    //cout << "pnp relative_yaw " << relative_yaw << endl;
 	    const double max_loop_yaw = forced_geometry_active
 	    	? LOOP_ORB_DENSE_MAX_YAW_DEG : LOOP_MAX_YAW_DEG;
-	    if (abs(relative_yaw) < max_loop_yaw && relative_t.norm() < LOOP_MAX_TRANSLATION)
+	    const bool translation_ok = LOOP_MAX_TRANSLATION <= 0.0 ||
+	        relative_t.norm() < LOOP_MAX_TRANSLATION;
+	    if (abs(relative_yaw) < max_loop_yaw && translation_ok)
 	    {
 
 	    	has_loop = true;
@@ -1769,7 +2056,8 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	struct CameraPnPResult
 	{
 		int camera_id = -1;
-		int matches = 0;
+		int descriptor_matches = 0;
+		int epipolar_matches = 0;
 		int inliers = 0;
 		Eigen::Vector3d T = Eigen::Vector3d::Zero();
 		Eigen::Matrix3d R = Eigen::Matrix3d::Identity();
@@ -1780,12 +2068,16 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 		std::min(required_pnp_inliers, LOOP_PER_CAMERA_MIN_INLIERS);
 	for (int camera_id = 0; camera_id < (int)m_cameras.size(); ++camera_id)
 	{
-		vector<cv::Point2f> camera_points_2d;
+		vector<cv::Point2f> camera_points_cur;
+		vector<cv::Point2f> camera_points_old;
 		vector<cv::Point3f> camera_points_3d;
 		vector<int> camera_match_indices;
 		for (int i = 0; i < (int)matched_3d.size(); ++i)
 		{
-			if (i >= (int)matched_camera_old.size() || matched_camera_old[i] != camera_id)
+			if (i >= (int)matched_camera_cur.size() ||
+				i >= (int)matched_camera_old.size() ||
+				matched_camera_cur[i] != camera_id ||
+				matched_camera_old[i] != camera_id)
 				continue;
 			if (i < (int)matched_feature_old.size() && matched_feature_old[i] >= 0)
 			{
@@ -1794,39 +2086,60 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 					old_kf->loop_features[old_feature_index].bearing.z() <= LOOP_EUCM_MIN_Z)
 					continue;
 			}
-			if (!std::isfinite(matched_2d_old_norm[i].x) ||
+			if (!std::isfinite(matched_2d_cur_norm[i].x) ||
+				!std::isfinite(matched_2d_cur_norm[i].y) ||
+				!std::isfinite(matched_2d_old_norm[i].x) ||
 				!std::isfinite(matched_2d_old_norm[i].y) ||
 				!std::isfinite(matched_3d[i].x) ||
 				!std::isfinite(matched_3d[i].y) ||
 				!std::isfinite(matched_3d[i].z))
 				continue;
-			camera_points_2d.push_back(matched_2d_old_norm[i]);
+			camera_points_cur.push_back(matched_2d_cur_norm[i]);
+			camera_points_old.push_back(matched_2d_old_norm[i]);
 			camera_points_3d.push_back(matched_3d[i]);
 			camera_match_indices.push_back(i);
 		}
+		const int descriptor_matches = static_cast<int>(camera_points_3d.size());
+		vector<uchar> epipolar_status;
+		const bool epipolar_applied = EpipolarRANSAC(
+			camera_points_cur, camera_points_old, epipolar_status);
+		if (epipolar_applied)
+		{
+			reduceVector(camera_points_cur, epipolar_status);
+			reduceVector(camera_points_old, epipolar_status);
+			reduceVector(camera_points_3d, epipolar_status);
+			reduceVector(camera_match_indices, epipolar_status);
+		}
+		ROS_INFO("[loop_fusion][epipolar] cur=%d old=%d cam=%d descriptor=%d "
+			"inliers=%zu applied=%d min=%d threshold=%.1fpx",
+			index, old_kf->index, camera_id, descriptor_matches,
+			camera_points_3d.size(), epipolar_applied ? 1 : 0,
+			LOOP_EPIPOLAR_MIN_MATCHES, LOOP_EPIPOLAR_REPROJECTION_ERROR_PX);
 		if ((int)camera_points_3d.size() < per_camera_min)
 		{
-			ROS_INFO("[loop_fusion][EUCM-PnP] cur=%d old=%d cam=%d usable=%zu required=%d",
+			ROS_INFO("[loop_fusion][EUCM-PnP] cur=%d old=%d cam=%d epipolar=%zu required=%d",
 				index, old_kf->index, camera_id, camera_points_3d.size(), per_camera_min);
 			continue;
 		}
 		CameraPnPResult result;
 		result.camera_id = camera_id;
-		result.matches = static_cast<int>(camera_points_3d.size());
+		result.descriptor_matches = descriptor_matches;
+		result.epipolar_matches = static_cast<int>(camera_points_3d.size());
 		vector<uchar> camera_status;
-		const bool pnp_solved = PnPRANSAC(camera_points_2d, camera_points_3d, camera_status,
+		const bool pnp_solved = PnPRANSAC(camera_points_old, camera_points_3d, camera_status,
 			result.T, result.R, camera_id);
 		result.inliers = std::count(camera_status.begin(), camera_status.end(), (uchar)1);
 		for (int i = 0; i < std::min<int>(camera_status.size(), camera_match_indices.size()); ++i)
 			if (camera_status[i])
 				result.inlier_match_indices.push_back(camera_match_indices[i]);
-		ROS_INFO("[loop_fusion][EUCM-PnP] cur=%d old=%d cam=%d matches=%zu solved=%d inliers=%d",
-			index, old_kf->index, camera_id, camera_points_3d.size(),
+		ROS_INFO("[loop_fusion][EUCM-PnP] cur=%d old=%d cam=%d descriptor=%d "
+			"epipolar=%d solved=%d inliers=%d",
+			index, old_kf->index, camera_id, result.descriptor_matches,
+			result.epipolar_matches,
 			pnp_solved ? 1 : 0, result.inliers);
 		if (result.inliers >= per_camera_min)
 			camera_results.push_back(result);
 	}
-
 	bool cameras_consistent = true;
 	if (camera_results.size() >= 2)
 	{
@@ -1847,11 +2160,14 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	for (const CameraPnPResult &result : camera_results)
 		if (!best_result || result.inliers > best_result->inliers)
 			best_result = &result;
-	const int single_camera_required = exact_dense_geometry_active &&
-		!forced_geometry_active ? LOOP_SINGLE_CAMERA_MIN_INLIERS : required_pnp_inliers;
-	const double best_inlier_ratio = best_result && best_result->matches > 0
-		? static_cast<double>(best_result->inliers) / best_result->matches : 0.0;
-	const bool single_camera_ratio_ok = !exact_dense_geometry_active ||
+	const int single_camera_required = use_orb && !forced_geometry_active
+		? LOOP_SINGLE_CAMERA_MIN_INLIERS : required_pnp_inliers;
+	// Keep the single-camera ratio conservative: use all descriptor matches as
+	// the denominator, not only the epipolar-filtered subset.
+	const double best_inlier_ratio = best_result && best_result->descriptor_matches > 0
+		? static_cast<double>(best_result->inliers) /
+			best_result->descriptor_matches : 0.0;
+	const bool single_camera_ratio_ok = !use_orb ||
 		forced_geometry_active ||
 		best_inlier_ratio >= LOOP_SINGLE_CAMERA_MIN_INLIER_RATIO;
 	const bool enough_inliers = best_result &&
@@ -1870,7 +2186,10 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 			Utility::R2ypr(origin_vio_R).x() - Utility::R2ypr(best_result->R).x());
 		const double max_loop_yaw = forced_geometry_active
 			? LOOP_ORB_DENSE_MAX_YAW_DEG : LOOP_MAX_YAW_DEG;
-		if (abs(relative_yaw) < max_loop_yaw && relative_t.norm() < LOOP_MAX_TRANSLATION)
+		const double relative_translation = relative_t.norm();
+		const bool translation_ok = LOOP_MAX_TRANSLATION <= 0.0 ||
+			relative_translation < LOOP_MAX_TRANSLATION;
+		if (abs(relative_yaw) < max_loop_yaw && translation_ok)
 		{
 			has_loop = true;
 			loop_index = old_kf->index;
@@ -1879,15 +2198,32 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 			ROS_INFO("[loop_fusion] accepted EUCM loop cur=%d old=%d cameras=%zu "
 				"inliers=%d best_ratio=%.2f yaw=%.2f/%.2f t=%.2f",
 				index, old_kf->index, camera_results.size(), total_camera_inliers,
-				best_inlier_ratio, relative_yaw, max_loop_yaw, relative_t.norm());
+				best_inlier_ratio, relative_yaw, max_loop_yaw, relative_translation);
+			vector<int> accepted_pnp_inlier_match_indices;
+			for (const CameraPnPResult &result : camera_results)
+				accepted_pnp_inlier_match_indices.insert(
+					accepted_pnp_inlier_match_indices.end(),
+					result.inlier_match_indices.begin(),
+					result.inlier_match_indices.end());
+			std::sort(accepted_pnp_inlier_match_indices.begin(),
+				accepted_pnp_inlier_match_indices.end());
+			accepted_pnp_inlier_match_indices.erase(
+				std::unique(accepted_pnp_inlier_match_indices.begin(),
+					accepted_pnp_inlier_match_indices.end()),
+				accepted_pnp_inlier_match_indices.end());
 			publishLoopMatchImage(*this, *old_kf, matched_2d_cur, matched_2d_old,
 				matched_camera_cur, matched_camera_old,
-				best_result->inlier_match_indices);
+				accepted_pnp_inlier_match_indices);
 			return true;
 		}
-		ROS_INFO("[loop_fusion][EUCM-PnP] rejected pose cur=%d old=%d cameras=%zu inliers=%d yaw=%.2f/%.2f t=%.2f/%.2f",
-			index, old_kf->index, camera_results.size(), total_camera_inliers,
-			relative_yaw, max_loop_yaw, relative_t.norm(), LOOP_MAX_TRANSLATION);
+		if (LOOP_MAX_TRANSLATION > 0.0)
+			ROS_INFO("[loop_fusion][EUCM-PnP] rejected pose cur=%d old=%d cameras=%zu inliers=%d yaw=%.2f/%.2f t=%.2f/%.2f",
+				index, old_kf->index, camera_results.size(), total_camera_inliers,
+				relative_yaw, max_loop_yaw, relative_translation, LOOP_MAX_TRANSLATION);
+		else
+			ROS_INFO("[loop_fusion][EUCM-PnP] rejected pose cur=%d old=%d cameras=%zu inliers=%d yaw=%.2f/%.2f t=%.2f translation_gate=off",
+				index, old_kf->index, camera_results.size(), total_camera_inliers,
+				relative_yaw, max_loop_yaw, relative_translation);
 	}
 	else if (!camera_results.empty())
 	{
