@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/luohongk/FishLoop-VINS">项目仓库</a> |
   <a href="video/FishLoop_VINS.mp4">演示视频</a> |
-  <a href="README.md">English</a> |
+  <a href="README.md?plain=0">English</a> |
   简体中文
 </p>
 
@@ -32,9 +32,6 @@
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-Apache_2.0-yellow.svg" />
-  </a>
-  <a href="https://www.zhiyuteam.com/">
-    <img src="https://img.shields.io/badge/Wuhan_University-BRAIN_LAB-green" />
   </a>
 </p>
 
