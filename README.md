@@ -8,7 +8,7 @@
   <a href="https://github.com/luohongk/FishLoop-VINS">Project Repository</a> |
   <a href="video/FishLoop_VINS.mp4">Demo Video</a> |
   English |
-  <a href="README_CN.md?plain=0">简体中文</a>
+  <a href="README_CN.md">简体中文</a>
 </p>
 
 <p align="center">
