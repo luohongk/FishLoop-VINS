@@ -1,16 +1,56 @@
+<h2 align="center">FishLoop-VINS：面向双鱼眼相机的实时视觉惯性 SLAM 系统<br>与多视图回环融合</h2>
+
+<h3 align="center">
+  <a href="https://luohongkun.top/scholar/">Hongkun Luo</a>
+</h3>
+
+<p align="center">
+  <a href="https://github.com/luohongk/FishLoop-VINS">项目仓库</a> |
+  <a href="video/FishLoop_VINS.mp4">演示视频</a> |
+  <a href="README.md">English</a> |
+  简体中文
+</p>
+
+<p align="center">
+  <a href="https://github.com/luohongk/FishLoop-VINS">
+    <img src="https://img.shields.io/badge/VINS-Dual--Fisheye-red" />
+  </a>
+  <a href="https://isocpp.org/">
+    <img src="https://img.shields.io/badge/C%2B%2B-14-blue" />
+  </a>
+  <a href="http://wiki.ros.org/noetic">
+    <img src="https://img.shields.io/badge/ROS1-Noetic-blue" />
+  </a>
+  <a href="https://developer.nvidia.com/cuda-toolkit">
+    <img src="https://img.shields.io/badge/CUDA-11.8-76B900" />
+  </a>
+  <a href="https://github.com/luohongk/FishLoop-VINS">
+    <img src="https://img.shields.io/badge/Camera-EUCM-orange" />
+  </a>
+  <a href="https://github.com/dorian3d/DBoW2">
+    <img src="https://img.shields.io/badge/Loop_Closure-DBoW2-purple" />
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-Apache_2.0-yellow.svg" />
+  </a>
+  <a href="https://www.zhiyuteam.com/">
+    <img src="https://img.shields.io/badge/Wuhan_University-BRAIN_LAB-green" />
+  </a>
+</p>
+
 <div align="center">
   <img src="image/logo.png" alt="FishLoop-VINS logo" width="86%">
 </div>
 
 ---
 
-## 项目简介
+## 🐟 项目简介
 
 FishLoop-VINS 是一个运行于 ROS 1 的双鱼眼视觉惯性定位系统。在鱼眼 VIO 的基础上，系统加入了面向超广角相机的回环检测、几何验证与位姿图优化，使用双目鱼眼图像和 IMU 进行实时状态估计，并通过多视图回环融合抑制长期运行中的累计漂移。
 
 当前仓库已完整适配双鱼眼 EUCM（Extended Unified Camera Model）。每台鱼眼相机可展开为多个规范透视视图，用于特征跟踪、回环候选检索和匹配；候选回环最终回到原始 EUCM 像素与 bearing 上完成几何验证，避免直接将鱼眼图像作为普通针孔图像处理。
 
-## 运行效果
+## 🎬 运行效果
 
 <div align="center">
   <img src="image/run_images.png" alt="FishLoop-VINS runtime visualization" width="100%">
@@ -18,7 +58,7 @@ FishLoop-VINS 是一个运行于 ROS 1 的双鱼眼视觉惯性定位系统。�
 
 [观看演示视频](video/FishLoop_VINS.mp4)
 
-## 软件与硬件环境
+## 🧰 软件与硬件环境
 
 推荐使用仓库提供的 Docker 环境，以避免 ROS、OpenCV、CUDA 和 Ceres 版本冲突。本仓库当前仅支持配备 NVIDIA GPU 的设备。
 
@@ -34,18 +74,18 @@ FishLoop-VINS 是一个运行于 ROS 1 的双鱼眼视觉惯性定位系统。�
 
 运行前必须安装 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)。
 
-## 快速开始：Docker GPU 版本
+## 🚀 快速开始：Docker GPU 版本
 
-### 1. 获取代码
+### 📥 1. 获取代码
 
 ```bash
 git clone https://github.com/luohongk/FishLoop-VINS.git
 cd FishLoop-VINS
 ```
 
-### 2. 获取镜像
+### 🐳 2. 获取镜像
 
-#### 方式一：本地构建
+#### 🛠️ 方式一：本地构建
 
 默认 GPU 架构为 Ada `8.9`，适用于 RTX 40 系列：
 
@@ -69,14 +109,14 @@ docker compose --profile gpu build
 CUDA_ARCH=8.6 CUDA_ARCH_PTX=8.6 docker compose --profile gpu build
 ```
 
-#### 方式二：从 Docker Hub 拉取
+#### ☁️ 方式二：从 Docker Hub 拉取
 
 ```bash
 docker pull luohongkun0715/fishloop_vins:gpu
 docker tag luohongkun0715/fishloop_vins:gpu fishloop_vins:gpu
 ```
 
-### 3. 启动容器
+### 📦 3. 启动容器
 
 允许容器访问宿主机 X11：
 
@@ -123,7 +163,7 @@ xhost +local:root && docker run -it --rm \
   fishloop_vins:gpu
 ```
 
-### 4. 在容器内编译
+### 🔨 4. 在容器内编译
 
 GPU Dockerfile 已准备完整依赖，但挂载源码后仍需在容器中编译当前工作区：
 
@@ -134,7 +174,7 @@ catkin_make -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -j8
 source devel/setup.bash
 ```
 
-### 5. 启动 FishLoop-VINS
+### 🐠 5. 启动 FishLoop-VINS
 
 继续在当前容器终端中运行：
 
@@ -150,7 +190,7 @@ roslaunch fishloop_vins vins_fisheye_loop.launch
 - `loop_fusion_node`：回环检测和位姿图优化
 - RViz：轨迹、回环和地图可视化
 
-### 6. 播放 rosbag
+### ▶️ 6. 播放 rosbag
 
 样例数据：[Google Drive：example.bag](https://drive.google.com/file/d/173pJxOWuc-TGzYazSCw-WAJ2W-pfcllE/view?usp=sharing)
 
@@ -161,7 +201,7 @@ docker exec -it fishloop_vins_gpu bash
 rosbag play /data/example.bag --clock -r 0.3
 ```
 
-## 轨迹输出
+## 🗺️ 轨迹输出
 
 默认输出目录：
 
@@ -189,7 +229,7 @@ timestamp_ns,px,py,pz,qw,qx,qy,qz,vx,vy,vz
 timestamp_ns,px,py,pz,qw,qx,qy,qz
 ```
 
-## 致谢
+## 💖 致谢
 
 FishLoop-VINS 基于并借鉴了以下优秀开源项目：
 
@@ -199,6 +239,6 @@ FishLoop-VINS 基于并借鉴了以下优秀开源项目：
 - [Ceres Solver](http://ceres-solver.org/)：非线性最小二乘优化
 - [libSGM](https://github.com/fixstars/libSGM)：CUDA 半全局立体匹配
 
-## 许可证
+## 📜 许可证
 
 仓库根目录的 [LICENSE](LICENSE) 文件声明为 Apache License 2.0。需要注意，部分 ROS package 元数据以及继承或修改自上游项目的源码可能标注了不同许可证；在公开分发或商业使用前，请核对并统一项目许可证元数据，同时遵循所有第三方组件的许可要求。
